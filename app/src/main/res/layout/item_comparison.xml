@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingVertical="6dp">
+
+    <TextView
+        android:id="@+id/tv_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="2"
+        android:textColor="@color/text_primary"
+        android:textSize="12sp"
+        tools:text="ANDROID_ID" />
+
+    <TextView
+        android:id="@+id/tv_java"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1.5"
+        android:fontFamily="monospace"
+        android:textColor="@color/text_secondary"
+        android:textSize="10sp"
+        tools:text="9a8b.." />
+
+    <TextView
+        android:id="@+id/tv_native"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1.5"
+        android:fontFamily="monospace"
+        android:textColor="@color/text_secondary"
+        android:textSize="10sp"
+        tools:text="9a8b.." />
+
+    <TextView
+        android:id="@+id/tv_syscall"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1.5"
+        android:fontFamily="monospace"
+        android:textColor="@color/text_secondary"
+        android:textSize="10sp"
+        tools:text="9a8b.." />
+
+    <ImageView
+        android:id="@+id/iv_status"
+        android:layout_width="20dp"
+        android:layout_height="20dp"
+        android:src="@drawable/ic_status_safe" />
+
+</LinearLayout>

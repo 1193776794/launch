@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?attr/colorControlNormal">
+    <!-- 盾牌带扫描线 - 环境检测 -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12 5.16,-1.26 9,-6.45 9,-12V5l-9,-4z"/>
+    <path
+        android:fillColor="@android:color/black"
+        android:fillAlpha="0.2"
+        android:pathData="M12,3.19l7,3.11V11c0,4.52 -2.98,8.69 -7,9.93 -4.02,-1.24 -7,-5.41 -7,-9.93V6.3l7,-3.11z"/>
+    <!-- 扫描线 -->
+    <path
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="1.2"
+        android:fillColor="#00000000"
+        android:pathData="M7,9 L17,9"/>
+    <path
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.7"
+        android:fillColor="#00000000"
+        android:pathData="M8,12 L16,12"/>
+    <path
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="0.8"
+        android:strokeAlpha="0.4"
+        android:fillColor="#00000000"
+        android:pathData="M9,15 L15,15"/>
+</vector>

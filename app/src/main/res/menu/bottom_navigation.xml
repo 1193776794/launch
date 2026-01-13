@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item
+        android:id="@+id/navigation_environment"
+        android:icon="@drawable/ic_shield"
+        android:title="@string/nav_environment" />
+
+    <item
+        android:id="@+id/navigation_fingerprint"
+        android:icon="@drawable/ic_fingerprint"
+        android:title="@string/nav_fingerprint" />
+
+    <item
+        android:id="@+id/navigation_device_info"
+        android:icon="@drawable/ic_phone"
+        android:title="@string/nav_device_info" />
+
+    <item
+        android:id="@+id/navigation_about"
+        android:icon="@drawable/ic_info"
+        android:title="@string/nav_about" />
+
+</menu>

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 盾牌主体 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,20 L24,32 L24,52 C24,72 36,88 54,94 C72,88 84,72 84,52 L84,32 L54,20 Z"/>
+
+    <!-- 盾牌内部渐变效果 -->
+    <path
+        android:fillColor="#E8F5E9"
+        android:pathData="M54,24 L28,34.5 L28,52 C28,69.5 38.5,83.5 54,89 C69.5,83.5 80,69.5 80,52 L80,34.5 L54,24 Z"/>
+
+    <!-- 盾牌边框 -->
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="2"
+        android:fillColor="#00000000"
+        android:pathData="M54,22 L26,33 L26,52 C26,70.5 37,85 54,91 C71,85 82,70.5 82,52 L82,33 L54,22 Z"/>
+
+    <!-- 对勾符号 -->
+    <path
+        android:fillColor="#4CAF50"
+        android:pathData="M46,58 L40,52 L37,55 L46,64 L70,40 L67,37 L46,58 Z"/>
+
+    <!-- 盾牌顶部高光 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.3"
+        android:pathData="M54,24 L28,34.5 L28,40 C40,36 54,34 80,40 L80,34.5 L54,24 Z"/>
+
+    <!-- 扫描线效果 -->
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.3"
+        android:fillColor="#00000000"
+        android:pathData="M32,45 L76,45"/>
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.2"
+        android:fillColor="#00000000"
+        android:pathData="M34,55 L74,55"/>
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.15"
+        android:fillColor="#00000000"
+        android:pathData="M38,65 L70,65"/>
+
+</vector>

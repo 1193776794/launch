@@ -1,0 +1,237 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App Info -->
+    <string name="app_name">Launch</string>
+    <!-- app_version is auto-generated from build.gradle versionName -->
+    <string name="author_name">在座的各位所有大佬</string>
+    <string name="author_wechat">xx1193776794</string>
+    <string name="app_description">收集全网特征检测，欢迎各位大佬提供，本app无混淆加密，可以查看各种检测点进行对抗</string>
+
+    <!-- Navigation -->
+    <string name="nav_environment">环境检测</string>
+    <string name="nav_fingerprint">指纹信息</string>
+    <string name="nav_device_info">机型信息</string>
+    <string name="nav_about">关于</string>
+
+    <!-- Status -->
+    <string name="status_safe">安全</string>
+    <string name="status_risk">风险</string>
+    <string name="status_warning">警告</string>
+    <string name="status_unknown">未知</string>
+    <string name="status_detected">已检测到</string>
+    <string name="status_not_detected">未检测到</string>
+    <string name="status_normal">正常</string>
+    <string name="status_abnormal">异常</string>
+
+    <!-- Refresh -->
+    <string name="refresh">刷新检测</string>
+    <string name="refreshing">正在检测...</string>
+    <string name="refresh_complete">检测完成</string>
+    <string name="refresh_failed">检测失败，请重试</string>
+    <string name="last_check_time">上次检测: %s</string>
+
+    <!-- Environment Detection -->
+    <string name="environment_title">设备环境检测</string>
+    <string name="detection_overview">检测状态总览</string>
+    <string name="overall_score">综合评分</string>
+    <string name="score_format">%d/100</string>
+
+    <!-- Detection Categories -->
+    <string name="category_root">Root 检测</string>
+    <string name="category_hook">Hook 检测</string>
+    <string name="category_emulator">模拟器检测</string>
+    <string name="category_debug">调试检测</string>
+    <string name="category_integrity">完整性检测</string>
+    <string name="category_network">网络检测</string>
+    <string name="category_side_channel">侧信道攻击</string>
+    <string name="category_readlink">符号链接检测</string>
+    <string name="category_zygote">Zygote 注入</string>
+
+    <!-- Zygote Detection Items -->
+    <string name="detect_zygisk">Zygisk 注入</string>
+    <string name="detect_riru">Riru 注入</string>
+    <string name="detect_native_bridge">Native Bridge</string>
+    <string name="detect_selinux_context">SELinux 上下文</string>
+    <string name="detect_memory_maps">内存映射检测</string>
+    <string name="detect_app_process">app_process 检测</string>
+    <string name="detect_zygote_modules">Zygote 模块</string>
+    <string name="detect_memory_integrity">内存完整性</string>
+    <string name="detect_anon_memory">匿名内存检测</string>
+    <string name="detect_library_hooks">库函数钩子</string>
+
+    <!-- Readlink Detection Items -->
+    <string name="detect_proc_exe">进程可执行路径</string>
+    <string name="detect_proc_maps">内存映射检测</string>
+    <string name="detect_proc_mounts">挂载信息检测</string>
+    <string name="detect_proc_root">进程根目录</string>
+    <string name="detect_proc_cwd">工作目录检测</string>
+    <string name="detect_proc_fd">文件描述符</string>
+    <string name="detect_su_symlinks">SU 符号链接</string>
+    <string name="detect_system_binaries">系统二进制文件</string>
+    <string name="detect_app_path">应用路径检测</string>
+    <string name="detect_mount_namespace">挂载命名空间</string>
+
+    <!-- Side-Channel Detection Items -->
+    <string name="detect_spectre">Spectre 漏洞</string>
+    <string name="detect_meltdown">Meltdown 漏洞</string>
+    <string name="detect_kpti">KPTI 内核隔离</string>
+    <string name="detect_spectre_mitigation">Spectre 缓解措施</string>
+    <string name="detect_kaslr">KASLR 地址随机化</string>
+    <string name="detect_perf_paranoid">性能计数器访问</string>
+    <string name="detect_kallsyms">内核符号表</string>
+    <string name="detect_selinux">SELinux 状态</string>
+    <string name="detect_cache_timing">缓存时序攻击</string>
+    <string name="detect_mem_disclosure">内存泄露风险</string>
+
+    <!-- Root Detection Items -->
+    <string name="detect_magisk">Magisk 检测</string>
+    <string name="detect_su_files">SU 文件检测</string>
+    <string name="detect_kernelsu">KernelSU 检测</string>
+    <string name="detect_apatch">APatch 检测</string>
+    <string name="detect_sukisu">SukiSU 检测</string>
+    <string name="detect_root_manager">Root 管理器</string>
+    <string name="detect_root_cloaking">Root 隐藏模块</string>
+
+    <!-- Hook Detection Items -->
+    <string name="detect_xposed">Xposed 框架</string>
+    <string name="detect_frida">Frida 检测</string>
+    <string name="detect_lsposed">LSPosed 检测</string>
+    <string name="detect_edxposed">EdXposed 检测</string>
+
+    <!-- Emulator Detection Items -->
+    <string name="detect_emulator_env">模拟器环境</string>
+    <string name="detect_virtual_machine">虚拟机特征</string>
+    <string name="detect_multi_open">多开检测</string>
+    <string name="detect_cloud_phone">云手机检测</string>
+
+    <!-- Debug Detection Items -->
+    <string name="detect_usb_debug">USB 调试</string>
+    <string name="detect_debugger">调试器连接</string>
+    <string name="detect_jdwp">JDWP 检测</string>
+    <string name="detect_ptrace">Ptrace 检测</string>
+
+    <!-- Fingerprint -->
+    <string name="fingerprint_title">设备指纹信息</string>
+    <string name="fingerprint_overview">设备指纹概览</string>
+    <string name="device_id">综合设备指纹</string>
+    <string name="trust_level">可信度</string>
+    <string name="no_tampering">未检测到篡改</string>
+    <string name="tampering_detected">检测到篡改</string>
+
+    <!-- Fingerprint Items - Basic -->
+    <string name="android_id">ANDROID_ID</string>
+    <string name="serial_number">设备序列号</string>
+    <string name="mac_address">MAC 地址</string>
+    <string name="imei">IMEI</string>
+    <string name="build_fingerprint">Build 指纹</string>
+    <string name="hardware_fingerprint">硬件指纹 Hash</string>
+    <string name="software_fingerprint">软件指纹 Hash</string>
+
+    <!-- Fingerprint Items - Kernel -->
+    <string name="boot_id">Boot ID</string>
+    <string name="random_uuid">Random UUID</string>
+    <string name="kernel_ver">内核版本</string>
+    <string name="hostname">主机名</string>
+
+    <!-- Fingerprint Items - Hardware -->
+    <string name="cpu_serial">CPU 序列号</string>
+    <string name="cpu_hardware">CPU 硬件</string>
+    <string name="soc_serial">SoC 序列号</string>
+    <string name="soc_id">SoC ID</string>
+
+    <!-- Fingerprint Items - Boot Parameters -->
+    <string name="boot_serial">Boot 序列号</string>
+    <string name="boot_hardware">Boot 硬件</string>
+    <string name="boot_device">Boot Device</string>
+
+    <!-- Fingerprint Items - System IDs -->
+    <string name="vbmeta_digest">VBMeta 摘要</string>
+    <string name="build_id_label">Build ID</string>
+    <string name="display_id">Display ID</string>
+    <string name="bootloader_ver">Bootloader</string>
+    <string name="baseband_ver">基带版本</string>
+
+    <!-- Multi-source Compare -->
+    <string name="multi_source_compare">多源比对结果</string>
+    <string name="layer_java">Java</string>
+    <string name="layer_native">Native</string>
+    <string name="layer_syscall">Syscall</string>
+    <string name="consistent">一致</string>
+    <string name="inconsistent">不一致</string>
+
+    <!-- Device Info -->
+    <string name="device_info_title">设备机型信息</string>
+    <string name="device_legitimacy">机型合法性检测</string>
+    <string name="device_score">机型评分</string>
+    <string name="build_consistency">Build一致性</string>
+    <string name="rom_match">ROM匹配</string>
+    <string name="service_match">服务匹配</string>
+    <string name="hardware_consistency">硬件一致</string>
+    <string name="fingerprint_format">指纹格式</string>
+
+    <!-- Basic Info -->
+    <string name="basic_info">基础信息</string>
+    <string name="brand">品牌</string>
+    <string name="model">型号</string>
+    <string name="manufacturer">制造商</string>
+    <string name="device_code">设备代号</string>
+    <string name="board">主板</string>
+
+    <!-- System Info -->
+    <string name="system_info">系统信息</string>
+    <string name="android_version">Android 版本</string>
+    <string name="api_level">API Level</string>
+    <string name="rom_version">ROM 版本</string>
+    <string name="security_patch">安全补丁</string>
+    <string name="kernel_version">内核版本</string>
+
+    <!-- Hardware Info -->
+    <string name="hardware_info">硬件信息</string>
+    <string name="cpu">CPU</string>
+    <string name="gpu">GPU</string>
+    <string name="memory">内存</string>
+    <string name="storage">存储</string>
+    <string name="screen">屏幕</string>
+    <string name="camera">摄像头</string>
+    <string name="sensors">传感器</string>
+
+    <!-- Network Info -->
+    <string name="network_info">网络信息</string>
+    <string name="network_type">网络类型</string>
+    <string name="wifi_ssid">WiFi SSID</string>
+    <string name="ip_address">IP 地址</string>
+    <string name="carrier">运营商</string>
+
+    <!-- Vendor Services -->
+    <string name="vendor_services">厂商服务检测</string>
+    <string name="rom_features">ROM 特征验证</string>
+    <string name="installed">已安装</string>
+    <string name="not_installed">未安装</string>
+
+    <!-- About -->
+    <string name="about_title">关于</string>
+    <string name="version_format">版本 %s</string>
+    <string name="author_info">作者信息</string>
+    <string name="feature_intro">功能介绍</string>
+    <string name="feature_1">设备环境安全检测 (Root/Hook/模拟器/调试)</string>
+    <string name="feature_2">设备指纹采集与篡改检测</string>
+    <string name="feature_3">机型合法性验证</string>
+    <string name="feature_4">多层检测架构 (Java/Native/Syscall)</string>
+    <string name="check_update">检查更新</string>
+    <string name="feedback">反馈问题</string>
+    <string name="rate">评分</string>
+
+    <!-- Common -->
+    <string name="copy">复制</string>
+    <string name="copied">已复制到剪贴板</string>
+    <string name="expand">展开</string>
+    <string name="collapse">收起</string>
+    <string name="permission_required">需要权限</string>
+    <string name="request_permission">申请权限</string>
+    <string name="real_device">真实设备</string>
+    <string name="enabled">已开启</string>
+    <string name="disabled">已关闭</string>
+    <string name="connected">已连接</string>
+    <string name="not_connected">未连接</string>
+    <string name="not_set">未设置</string>
+</resources>

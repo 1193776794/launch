@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme -->
+    <style name="Theme.Launch" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Primary brand color -->
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorPrimaryVariant">@color/primary_dark</item>
+        <item name="colorOnPrimary">@color/text_on_primary</item>
+        <!-- Secondary brand color -->
+        <item name="colorSecondary">@color/accent</item>
+        <item name="colorSecondaryVariant">@color/primary_dark</item>
+        <item name="colorOnSecondary">@color/text_on_primary</item>
+        <!-- Status bar color -->
+        <item name="android:statusBarColor">@color/primary_dark</item>
+        <!-- Background -->
+        <item name="android:windowBackground">@color/background</item>
+        <item name="colorSurface">@color/surface</item>
+    </style>
+
+    <!-- Toolbar style -->
+    <style name="Theme.Launch.Toolbar" parent="Widget.MaterialComponents.Toolbar.Primary">
+        <item name="android:background">@color/primary</item>
+        <item name="titleTextColor">@color/text_on_primary</item>
+    </style>
+
+    <!-- Card style -->
+    <style name="Theme.Launch.Card" parent="Widget.MaterialComponents.CardView">
+        <item name="cardBackgroundColor">@color/card_background</item>
+        <item name="cardCornerRadius">12dp</item>
+        <item name="cardElevation">2dp</item>
+    </style>
+
+    <!-- Bottom Navigation style -->
+    <style name="Theme.Launch.BottomNavigation" parent="Widget.MaterialComponents.BottomNavigationView">
+        <item name="backgroundTint">@color/surface</item>
+        <item name="itemIconTint">@drawable/bottom_nav_color_selector</item>
+        <item name="itemTextColor">@drawable/bottom_nav_color_selector</item>
+    </style>
+
+    <!-- Splash Screen Theme -->
+    <style name="Theme.Launch.Splash" parent="Theme.Launch">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+    </style>
+</resources>

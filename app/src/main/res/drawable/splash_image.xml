@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="200dp"
+    android:height="200dp"
+    android:viewportWidth="200"
+    android:viewportHeight="200">
+
+    <!-- 外圈光环 -->
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="2"
+        android:strokeAlpha="0.3"
+        android:fillColor="#00000000"
+        android:pathData="M100,10 A90,90 0 1,1 99.9,10"/>
+
+    <!-- 中圈光环 -->
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1.5"
+        android:strokeAlpha="0.2"
+        android:fillColor="#00000000"
+        android:pathData="M100,20 A80,80 0 1,1 99.9,20"/>
+
+    <!-- 盾牌阴影 -->
+    <path
+        android:fillColor="#000000"
+        android:fillAlpha="0.1"
+        android:pathData="M102,42 L52,62 L52,102 C52,137 72,162 102,172 C132,162 152,137 152,102 L152,62 L102,42 Z"/>
+
+    <!-- 盾牌主体 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M100,38 L50,58 L50,98 C50,133 70,158 100,168 C130,158 150,133 150,98 L150,58 L100,38 Z"/>
+
+    <!-- 盾牌内部 -->
+    <path
+        android:fillColor="#E8F5E9"
+        android:pathData="M100,46 L58,63 L58,98 C58,128 75,150 100,159 C125,150 142,128 142,98 L142,63 L100,46 Z"/>
+
+    <!-- 盾牌边框 -->
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="3"
+        android:fillColor="#00000000"
+        android:pathData="M100,42 L54,60 L54,98 C54,130.5 72.5,154 100,163.5 C127.5,154 146,130.5 146,98 L146,60 L100,42 Z"/>
+
+    <!-- 对勾符号 -->
+    <path
+        android:fillColor="#4CAF50"
+        android:pathData="M88,110 L76,98 L70,104 L88,122 L130,80 L124,74 L88,110 Z"/>
+
+    <!-- 扫描线动效区域 -->
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.4"
+        android:fillColor="#00000000"
+        android:pathData="M65,78 L135,78"/>
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.25"
+        android:fillColor="#00000000"
+        android:pathData="M62,93 L138,93"/>
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.15"
+        android:fillColor="#00000000"
+        android:pathData="M65,108 L135,108"/>
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.1"
+        android:fillColor="#00000000"
+        android:pathData="M70,123 L130,123"/>
+
+    <!-- 顶部高光 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.4"
+        android:pathData="M100,46 L58,63 L58,72 C75,66 100,64 142,72 L142,63 L100,46 Z"/>
+
+    <!-- 科技感装饰点 -->
+    <path
+        android:fillColor="#4CAF50"
+        android:fillAlpha="0.6"
+        android:pathData="M30,100 C30,97.2 32.2,95 35,95 C37.8,95 40,97.2 40,100 C40,102.8 37.8,105 35,105 C32.2,105 30,102.8 30,100 Z"/>
+    <path
+        android:fillColor="#4CAF50"
+        android:fillAlpha="0.6"
+        android:pathData="M160,100 C160,97.2 162.2,95 165,95 C167.8,95 170,97.2 170,100 C170,102.8 167.8,105 165,105 C162.2,105 160,102.8 160,100 Z"/>
+    <path
+        android:fillColor="#4CAF50"
+        android:fillAlpha="0.4"
+        android:pathData="M100,175 C100,172.2 102.2,170 105,170 C107.8,170 110,172.2 110,175 C110,177.8 107.8,180 105,180 C102.2,180 100,177.8 100,175 Z"/>
+
+    <!-- 连接线 -->
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.3"
+        android:fillColor="#00000000"
+        android:pathData="M40,100 L54,100"/>
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="1"
+        android:strokeAlpha="0.3"
+        android:fillColor="#00000000"
+        android:pathData="M146,100 L160,100"/>
+
+</vector>

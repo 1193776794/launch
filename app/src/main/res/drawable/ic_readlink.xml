@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Chain/Link icon representing symlinks -->
+    <!-- First link -->
+    <path
+        android:fillColor="#673AB7"
+        android:pathData="M17,7h-4v2h4c1.65,0 3,1.35 3,3s-1.35,3 -3,3h-4v2h4c2.76,0 5,-2.24 5,-5s-2.24,-5 -5,-5z"/>
+    <!-- Second link -->
+    <path
+        android:fillColor="#673AB7"
+        android:pathData="M11,7H7c-2.76,0 -5,2.24 -5,5s2.24,5 5,5h4v-2H7c-1.65,0 -3,-1.35 -3,-3s1.35,-3 3,-3h4V7z"/>
+    <!-- Connection bar -->
+    <path
+        android:fillColor="#673AB7"
+        android:pathData="M8,11h8v2H8z"/>
+    <!-- Arrow indicator for link direction -->
+    <path
+        android:fillColor="#9C27B0"
+        android:pathData="M19,19l-3,-3h2v-3h2v3h2l-3,3z"/>
+</vector>

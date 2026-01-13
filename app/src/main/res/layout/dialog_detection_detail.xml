@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.cardview.widget.CardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_margin="16dp"
+    app:cardCornerRadius="12dp"
+    app:cardElevation="8dp">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxHeight="600dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <!-- 标题 -->
+            <TextView
+                android:id="@+id/dialog_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="检测项标题"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:textColor="#333333"
+                android:paddingBottom="8dp" />
+
+            <!-- 描述 -->
+            <TextView
+                android:id="@+id/dialog_description"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="检测项描述"
+                android:textSize="14sp"
+                android:textColor="#666666"
+                android:paddingBottom="16dp" />
+
+            <!-- 状态栏 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:background="#F5F5F5"
+                android:padding="12dp"
+                android:layout_marginBottom="16dp">
+
+                <View
+                    android:id="@+id/status_indicator"
+                    android:layout_width="12dp"
+                    android:layout_height="12dp"
+                    android:background="@drawable/status_indicator_circle"
+                    android:layout_marginEnd="8dp" />
+
+                <TextView
+                    android:id="@+id/dialog_status"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="状态"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- 分隔线 -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#E0E0E0"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="8dp" />
+
+            <!-- 检测层级标题 -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="📊 检测层级"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:textColor="#333333"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp" />
+
+            <!-- 检测层级容器 -->
+            <LinearLayout
+                android:id="@+id/layer_container"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#FAFAFA"
+                android:padding="8dp"
+                android:layout_marginBottom="16dp">
+                <!-- 动态添加检测层级 -->
+            </LinearLayout>
+
+            <!-- 分隔线 -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#E0E0E0"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="8dp" />
+
+            <!-- 详细信息标题 -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="🔍 检测详情"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:textColor="#333333"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp" />
+
+            <!-- 详细信息容器 -->
+            <LinearLayout
+                android:id="@+id/details_container"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:layout_marginBottom="16dp">
+                <!-- 动态添加详细信息 -->
+            </LinearLayout>
+
+            <!-- 关闭按钮 -->
+            <Button
+                android:id="@+id/btn_close"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="关闭"
+                android:textSize="16sp"
+                android:textColor="#FFFFFF"
+                android:background="@drawable/button_primary"
+                android:layout_marginTop="8dp"
+                android:padding="12dp" />
+
+        </LinearLayout>
+    </ScrollView>
+
+</androidx.cardview.widget.CardView>
