@@ -169,8 +169,11 @@ bool RootDetector::checkMountInfoNative() {
 
     std::string line;
     while (std::getline(file, line)) {
+        // Only check for root-related keywords, not generic overlay/tmpfs
         if (line.find("magisk") != std::string::npos ||
-            line.find("overlay") != std::string::npos) {
+            line.find("zygisk") != std::string::npos ||
+            line.find("kernelsu") != std::string::npos ||
+            line.find("/data/adb/") != std::string::npos) {
             LOGD("Suspicious mount found (native): %s", line.c_str());
             return true;
         }
@@ -183,16 +186,18 @@ bool RootDetector::checkSuspiciousMountsNative() {
     if (!file.is_open()) return false;
 
     std::string line;
+    // Only check for root-related patterns
+    // Note: overlay and tmpfs are normal system mounts, don't check them
     const std::vector<std::string> suspiciousPatterns = {
         "magisk",
         "zygisk",
         "zygisksu",
-        "overlay",
-        "tmpfs",
-        "debug_ramdisk",
-        "module.prop",
+        "kernelsu",
+        "apatch",
         "/data/adb/modules",
-        "cacerts"
+        "/data/adb/ksu",
+        "/data/adb/ap",
+        "module.prop"
     };
 
     while (std::getline(file, line)) {
@@ -296,8 +301,11 @@ bool RootDetector::checkSukiSUSyscall() {
 
 bool RootDetector::checkMountInfoSyscall() {
     std::string content = syscall_read_file("/proc/self/mountinfo", 8192);
+    // Only check for root-related keywords, not generic overlay/tmpfs
     if (content.find("magisk") != std::string::npos ||
-        content.find("overlay") != std::string::npos) {
+        content.find("zygisk") != std::string::npos ||
+        content.find("kernelsu") != std::string::npos ||
+        content.find("/data/adb/") != std::string::npos) {
         LOGD("Suspicious mount found (syscall)");
         return true;
     }
@@ -309,17 +317,19 @@ bool RootDetector::checkSuspiciousMountsSyscall() {
     std::string content = syscall_read_file("/proc/self/mountinfo", 16384);
     if (content.empty()) return false;
 
+    // Only check for root-related patterns
+    // Note: overlay and tmpfs are normal system mounts, don't check them
     const std::vector<std::string> suspiciousPatterns = {
         "magisk",
         "zygisk",
         "zygisksu",
         "zygisk_su",
-        "overlay",
-        "tmpfs",
-        "debug_ramdisk",
-        "module.prop",
+        "kernelsu",
+        "apatch",
         "/data/adb/modules",
-        "cacerts"
+        "/data/adb/ksu",
+        "/data/adb/ap",
+        "module.prop"
     };
 
     // Convert to lowercase for case-insensitive matching

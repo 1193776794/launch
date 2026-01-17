@@ -3,9 +3,12 @@ package com.xff.launch.ui.fingerprint;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.media.MediaDrm;
+import android.media.UnsupportedSchemeException;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.util.Base64;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -33,6 +36,7 @@ import com.xff.launch.util.ReflectionUtils;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -223,15 +227,9 @@ public class FingerprintFragment extends Fragment {
         bootId.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallBootId, javaBootId));
         items.add(bootId);
 
-        // Random UUID (changes each read)
-        FingerprintItem randomUuid = new FingerprintItem("random_uuid", "Random UUID");
-        String javaUuid = ReflectionUtils.readFileFirstLine("/proc/sys/kernel/random/uuid");
-        String nativeUuid = nativeDetector.readKernelFile("/proc/sys/kernel/random/uuid");
-        String syscallUuid = nativeDetector.readFileSyscall("/proc/sys/kernel/random/uuid");
-        randomUuid.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaUuid, nativeUuid));
-        randomUuid.setLayerValue(DetectionLayer.NATIVE, nativeUuid);
-        randomUuid.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallUuid, javaUuid));
-        items.add(randomUuid);
+        // Note: /proc/sys/kernel/random/uuid generates a NEW UUID on each read
+        // It's NOT suitable for fingerprinting or multi-layer comparison
+        // Use boot_id instead which is stable within a boot session
 
         // Kernel Version - Multiple sources
         FingerprintItem kernelVersion = new FingerprintItem("kernel_version", "内核版本");
@@ -359,6 +357,14 @@ public class FingerprintFragment extends Fragment {
 
         // ==================== Additional System IDs ====================
 
+        // DRM ID (Widevine) - Hardware-bound, difficult to tamper
+        FingerprintItem drmId = new FingerprintItem("drm_id", "DRM ID (Widevine)");
+        String javaDrmId = getWidevineDeviceId();
+        drmId.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaDrmId, "N/A"));
+        drmId.setLayerValue(DetectionLayer.NATIVE, nonEmpty(javaDrmId, "N/A")); // DRM只能通过Java API获取
+        drmId.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(javaDrmId, "N/A"));
+        items.add(drmId);
+
         // ro.boot.vbmeta.digest - Verified Boot metadata
         FingerprintItem vbmetaDigest = new FingerprintItem("vbmeta_digest", "VBMeta 摘要");
         String propVbmeta = ReflectionUtils.getSystemProperty("ro.boot.vbmeta.digest");
@@ -442,9 +448,11 @@ public class FingerprintFragment extends Fragment {
         result.generateCompositeFingerprint();
 
         // Generate hardware and software hashes using reflection values
+        // Include DRM ID as it's a hardware-bound identifier
         String hwString = nonEmpty(reflectBrand) + nonEmpty(reflectModel) + nonEmpty(reflectDevice) +
                 nonEmpty(reflectHw) + nonEmpty(reflectBoard) + nonEmpty(nativeCpuSerial, javaCpuSerial) +
-                nonEmpty(nativeSocSerial, javaSocSerial) + nonEmpty(nativeBootSerial, javaBootSerial);
+                nonEmpty(nativeSocSerial, javaSocSerial) + nonEmpty(nativeBootSerial, javaBootSerial) +
+                nonEmpty(javaDrmId);
         result.setHardwareHash(sha256(hwString));
 
         String swString = nonEmpty(reflectFp) + nonEmpty(reflectId) +
@@ -464,6 +472,39 @@ public class FingerprintFragment extends Fragment {
         for (String value : values) {
             if (value != null && !value.isEmpty() && !value.equals("unknown") && !value.equals("Unknown")) {
                 return value;
+            }
+        }
+        return "";
+    }
+
+    /**
+     * Get Widevine DRM Device ID
+     * DRM ID is hardware-bound and very difficult to tamper with
+     *
+     * @return Base64-encoded device unique ID, or empty string if unavailable
+     */
+    private String getWidevineDeviceId() {
+        // Widevine UUID - standard identifier for Widevine DRM
+        final UUID WIDEVINE_UUID = new UUID(0xEDEF8BA979D64ACEL, 0xA3C827DCD51D21EDL);
+
+        MediaDrm mediaDrm = null;
+        try {
+            mediaDrm = new MediaDrm(WIDEVINE_UUID);
+            byte[] deviceId = mediaDrm.getPropertyByteArray(MediaDrm.PROPERTY_DEVICE_UNIQUE_ID);
+            if (deviceId != null && deviceId.length > 0) {
+                return Base64.encodeToString(deviceId, Base64.NO_WRAP);
+            }
+        } catch (UnsupportedSchemeException e) {
+            // Widevine not supported on this device
+        } catch (Exception e) {
+            // Other errors (security exception, etc.)
+        } finally {
+            if (mediaDrm != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    mediaDrm.close();
+                } else {
+                    mediaDrm.release();
+                }
             }
         }
         return "";

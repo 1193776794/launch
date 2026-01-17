@@ -99,10 +99,15 @@ public class FingerprintItem {
         for (String value : layerValues.values()) {
             // Skip null, empty, and "N/A" values - don't compare them
             if (value == null || value.isEmpty() || value.equals("N/A")) continue;
+
+            // Trim whitespace and newlines for comparison
+            String trimmedValue = value.trim();
+            if (trimmedValue.isEmpty()) continue;
+
             validValueCount++;
             if (firstValue == null) {
-                firstValue = value;
-            } else if (!firstValue.equals(value)) {
+                firstValue = trimmedValue;
+            } else if (!firstValue.equals(trimmedValue)) {
                 consistent = false;
                 return;
             }

@@ -99,6 +99,7 @@ public class ZygoteDetector {
         List<DetectionItem> items = new ArrayList<>();
 
         items.add(checkZygiskInjection());
+        items.add(checkZygiskSUDaemon());  // ZygiskSU/Zygisk Next 特有的守护进程检测
         items.add(checkRiruInjection());
         items.add(checkNativeBridge());
         items.add(checkSELinuxContext());
@@ -110,7 +111,8 @@ public class ZygoteDetector {
         items.add(checkLibraryHooks());
 
         // 新增检测项
-        items.add(checkZygoteParentProcess());
+        // Note: Removed checkZygoteParentProcess() - Zygote's parent is always init (PID 1)
+        // Zygisk doesn't change Zygote's parent process, so this check is ineffective
         items.add(checkAnonymousRwxMemory());
         items.add(checkInMemoryDexLoader());
 
@@ -119,6 +121,7 @@ public class ZygoteDetector {
 
     /**
      * Check for Zygisk injection in memory maps
+     * Supports: Magisk Zygisk, ZygiskSU (Zygisk Next), ReZygisk
      */
     private DetectionItem checkZygiskInjection() {
         DetectionItem item = new DetectionItem("Zygisk 注入", "检测Zygisk框架注入");
@@ -132,8 +135,26 @@ public class ZygoteDetector {
 
             // Java layer check - read maps
             String maps = nativeDetector.readFileSyscall("/proc/self/maps");
-            boolean javaDetected = maps.toLowerCase().contains("zygisk") ||
+            boolean mapsDetected = maps.toLowerCase().contains("zygisk") ||
                     maps.toLowerCase().contains("libzygisk");
+
+            // Check ro.zygisk.denylists property (ZygiskSU/Zygisk Next feature)
+            // If this property exists, Zygisk is installed
+            boolean propDetected = false;
+            try {
+                String denylistProp = System.getProperty("ro.zygisk.denylists");
+                if (denylistProp == null) {
+                    // Try via reflection for system properties
+                    Class<?> spClass = Class.forName("android.os.SystemProperties");
+                    java.lang.reflect.Method getMethod = spClass.getMethod("get", String.class, String.class);
+                    String value = (String) getMethod.invoke(null, "ro.zygisk.denylists", "");
+                    propDetected = !value.isEmpty();
+                } else {
+                    propDetected = true;
+                }
+            } catch (Exception ignored) {}
+
+            boolean javaDetected = mapsDetected || propDetected;
 
             item.setLayerResult(DetectionLayer.JAVA, !javaDetected);
             item.setLayerResult(DetectionLayer.NATIVE, !nativeDetected);
@@ -142,9 +163,12 @@ public class ZygoteDetector {
             if (syscallDetected || nativeDetected) {
                 item.setStatus(DetectionStatus.RISK);
                 item.setDetail("检测到Zygisk注入框架");
-            } else if (javaDetected) {
-                item.setStatus(DetectionStatus.WARNING);
-                item.setDetail("Java层检测到可疑迹象");
+            } else if (mapsDetected) {
+                item.setStatus(DetectionStatus.RISK);
+                item.setDetail("内存映射中检测到Zygisk");
+            } else if (propDetected) {
+                item.setStatus(DetectionStatus.RISK);
+                item.setDetail("检测到Zygisk (ro.zygisk.denylists)");
             } else {
                 item.setStatus(DetectionStatus.SAFE);
                 item.setDetail("未检测到Zygisk");
@@ -152,6 +176,84 @@ public class ZygoteDetector {
 
         } catch (Exception e) {
             Log.w(TAG, "checkZygiskInjection failed", e);
+            item.setStatus(DetectionStatus.UNKNOWN);
+        }
+
+        return item;
+    }
+
+    /**
+     * Check for ZygiskSU (Zygisk Next) daemon processes
+     * ZygiskSU uses specific daemon processes: zn-daemon, zn-nsdaemon, zn-zygisk-companion
+     */
+    private DetectionItem checkZygiskSUDaemon() {
+        DetectionItem item = new DetectionItem("ZygiskSU 守护进程", "检测Zygisk Next守护进程");
+
+        try {
+            boolean detected = false;
+            StringBuilder details = new StringBuilder();
+
+            // ZygiskSU daemon process name patterns
+            String[] daemonPatterns = {
+                "zn-daemon",           // Main ZygiskSU daemon
+                "zn-nsdaemon",         // Namespace daemon
+                "zn-zygisk-companion", // Zygisk companion process
+                "zygisk_gadget"        // Frida gadget via Zygisk
+            };
+
+            // Scan /proc for daemon processes
+            java.io.File procDir = new java.io.File("/proc");
+            String[] pids = procDir.list((dir, name) -> name.matches("\\d+"));
+
+            if (pids != null) {
+                for (String pid : pids) {
+                    try {
+                        // Try to read cmdline (may fail due to SELinux)
+                        java.io.File cmdlineFile = new java.io.File("/proc/" + pid + "/cmdline");
+                        if (cmdlineFile.canRead()) {
+                            java.io.BufferedReader reader = new java.io.BufferedReader(
+                                new java.io.FileReader(cmdlineFile));
+                            String cmdline = reader.readLine();
+                            reader.close();
+
+                            if (cmdline != null) {
+                                cmdline = cmdline.replace('\0', ' ').trim();
+                                for (String pattern : daemonPatterns) {
+                                    if (cmdline.toLowerCase().contains(pattern.toLowerCase())) {
+                                        detected = true;
+                                        if (details.length() > 0) details.append(", ");
+                                        details.append(pattern);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Exception ignored) {
+                        // SELinux may block access to other process's info
+                    }
+                }
+            }
+
+            // Also check via native detector
+            boolean nativeDetected = nativeDetector.checkZygiskSyscall();
+
+            item.setLayerResult(DetectionLayer.JAVA, !detected);
+            item.setLayerResult(DetectionLayer.NATIVE, !nativeDetected);
+            item.setLayerResult(DetectionLayer.SYSCALL, !nativeDetected);
+
+            if (detected) {
+                item.setStatus(DetectionStatus.RISK);
+                item.setDetail("检测到ZygiskSU守护进程: " + details.toString());
+            } else if (nativeDetected) {
+                item.setStatus(DetectionStatus.RISK);
+                item.setDetail("Native层检测到Zygisk");
+            } else {
+                item.setStatus(DetectionStatus.SAFE);
+                item.setDetail("未检测到ZygiskSU守护进程");
+            }
+
+        } catch (Exception e) {
+            Log.w(TAG, "checkZygiskSUDaemon failed", e);
             item.setStatus(DetectionStatus.UNKNOWN);
         }
 

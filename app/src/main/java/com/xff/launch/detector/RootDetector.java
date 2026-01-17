@@ -778,17 +778,18 @@ public class RootDetector {
             String line;
             int suspiciousCount = 0;
 
-            // 可疑挂载模式
+            // 可疑挂载模式 - 只检测与 Root 相关的特征
+            // 注意：overlay 和 tmpfs 是正常系统也使用的，不应作为通用检测模式
             String[] suspiciousPatterns = {
                 "magisk",
                 "zygisk",
                 "zygisksu",
-                "overlay",
-                "tmpfs",
-                "debug_ramdisk",
-                "module.prop",
+                "kernelsu",
+                "apatch",
                 "/data/adb/modules",
-                "cacerts"
+                "/data/adb/ksu",
+                "/data/adb/ap",
+                "module.prop"
             };
 
             while ((line = reader.readLine()) != null) {
