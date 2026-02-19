@@ -131,10 +131,10 @@ public class DebugDetector {
         // Native layer - read TracerPid via native
         int nativeTracerPid = nativeDetector.getTracerPid();
 
-        // Set layer results (INVERTED: true = safe, false = detected)
-        item.setLayerResult(DetectionLayer.JAVA, javaTracerPid == 0);
-        item.setLayerResult(DetectionLayer.NATIVE, nativeTracerPid == 0);
-        item.setLayerResult(DetectionLayer.SYSCALL, syscallTracerPid == 0);
+        // Set layer results: true = detected (TracerPid > 0), false = safe
+        item.setLayerResult(DetectionLayer.JAVA, javaTracerPid != 0);
+        item.setLayerResult(DetectionLayer.NATIVE, nativeTracerPid != 0);
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallTracerPid != 0);
 
         // Check all threads
         String allThreadsStatus = checkAllThreadsTracerPid();
@@ -232,10 +232,10 @@ public class DebugDetector {
             detail = "TracerPid:0 (正常 - 无反调试保护)";
         }
 
-        // Set layer results (true = safe/normal, false = risk)
-        item.setLayerResult(DetectionLayer.JAVA, tracerPid == 0 || isProtected);
-        item.setLayerResult(DetectionLayer.NATIVE, tracerPid == 0 || isProtected);
-        item.setLayerResult(DetectionLayer.SYSCALL, tracerPid == 0 || isProtected);
+        // Set layer results: true = detected risk (external debugger), false = safe/normal
+        item.setLayerResult(DetectionLayer.JAVA, tracerPid != 0 && !isProtected);
+        item.setLayerResult(DetectionLayer.NATIVE, tracerPid != 0 && !isProtected);
+        item.setLayerResult(DetectionLayer.SYSCALL, tracerPid != 0 && !isProtected);
 
         item.setStatus(status);
         item.setDetail(detail);
