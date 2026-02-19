@@ -39,8 +39,17 @@ public:
     static bool checkRiruZygiskSyscall();
     static bool checkMapsForHooksSyscall();
 
-    // Thread name detection for Frida
+    // Thread name detection for Frida (including linjector via syscall)
     static bool checkFridaThreads();
+
+    // /proc/net/tcp port scanning (IDA & Frida)
+    static bool checkIdaPortTcpNative();      // IDA port 23946 (0x5D8A)
+    static bool checkIdaPortTcpSyscall();
+    static bool checkFridaPortTcpNative();    // Frida port 27042 (0x69A2)
+    static bool checkFridaPortTcpSyscall();
+
+    // FD linjector scanning (Frida injector pipe detection)
+    static bool checkFridaFdLinjectorSyscall();
 
     // Get detailed info about LSPosed injection
     static std::string getLSPosedDetails();
