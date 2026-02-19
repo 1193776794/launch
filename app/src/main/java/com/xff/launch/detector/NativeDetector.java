@@ -36,6 +36,14 @@ public class NativeDetector {
     public native boolean checkMountInfoNative();
     public native boolean checkMountInfoSyscall();
 
+    /** Check /proc/self/mounts for Magisk mount signatures via direct syscall */
+    public native boolean checkMountsForMagiskNative();
+    public native boolean checkMountsForMagiskSyscall();
+
+    /** Check /proc/self/attr/prev for zygote SELinux context anomaly */
+    public native boolean checkZygoteContextNative();
+    public native boolean checkZygoteContextSyscall();
+
     // ===================== Hook Detection =====================
 
     public native boolean checkXposedNative();
