@@ -315,13 +315,44 @@ Java_com_xff_launch_detector_NativeDetector_readFileSyscall(JNIEnv *env, jobject
 // ===================== Readlink Detection (Syscall-based) =====================
 
 // Suspicious keywords to check in paths
+// Long/unique keywords - safe for simple substring matching
 static const char* SUSPICIOUS_KEYWORDS[] = {
-    "magisk", "su", "supersu", "superuser", "busybox",
-    "ksu", "kernelsu", "apatch", "lsposed", "edxposed",
-    "xposed", "riru", "zygisk", "shamiko", "hide",
+    "magisk", "supersu", "superuser", "busybox",
+    "kernelsu", "apatch", "lsposed", "edxposed",
+    "xposed", "riru", "zygisk", "shamiko",
     "frida", "substrate", "cydia"
 };
-static const int SUSPICIOUS_KEYWORDS_COUNT = 18;
+static const int SUSPICIOUS_KEYWORDS_COUNT = 15;
+
+// Short/ambiguous keywords - require word boundary matching to avoid false positives
+// e.g. "su" in "Consumer", "ashmem", "result"; "hide" in "override", "hidden"
+// "ksu" is also short enough to warrant boundary check
+static const char* BOUNDARY_KEYWORDS[] = {
+    "su", "hide", "ksu"
+};
+static const int BOUNDARY_KEYWORDS_COUNT = 3;
+
+// Check if the character is a word boundary (not alphanumeric or underscore)
+static bool is_word_boundary(char c) {
+    return !isalnum(static_cast<unsigned char>(c)) && c != '_';
+}
+
+// Check if keyword exists as a whole word/path segment in the string
+static bool find_with_boundary(const std::string& text, const char* keyword) {
+    size_t keyLen = strlen(keyword);
+    size_t pos = 0;
+    while ((pos = text.find(keyword, pos)) != std::string::npos) {
+        // Check left boundary: start of string or non-alphanumeric char
+        bool leftOk = (pos == 0) || is_word_boundary(text[pos - 1]);
+        // Check right boundary: end of string or non-alphanumeric char
+        bool rightOk = (pos + keyLen >= text.size()) || is_word_boundary(text[pos + keyLen]);
+        if (leftOk && rightOk) {
+            return true;
+        }
+        pos += 1;
+    }
+    return false;
+}
 
 static bool contains_suspicious(const std::string& path) {
     if (path.empty()) return false;
@@ -329,11 +360,21 @@ static bool contains_suspicious(const std::string& path) {
     for (char& c : lower) {
         c = tolower(c);
     }
+
+    // Check long/unique keywords with simple substring matching
     for (int i = 0; i < SUSPICIOUS_KEYWORDS_COUNT; i++) {
         if (lower.find(SUSPICIOUS_KEYWORDS[i]) != std::string::npos) {
             return true;
         }
     }
+
+    // Check short/ambiguous keywords with word boundary matching
+    for (int i = 0; i < BOUNDARY_KEYWORDS_COUNT; i++) {
+        if (find_with_boundary(lower, BOUNDARY_KEYWORDS[i])) {
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -611,8 +652,13 @@ Java_com_xff_launch_detector_NativeDetector_checkMountNamespaceNative(JNIEnv *en
     if (fp) {
         char line[512];
         while (fgets(line, sizeof(line), fp)) {
-            if (strstr(line, "magisk") || strstr(line, "ksu") ||
-                strstr(line, "apatch") || strstr(line, "overlay")) {
+            std::string lineStr(line);
+            std::string lineLower = lineStr;
+            for (char& c : lineLower) c = tolower(c);
+            if (lineLower.find("magisk") != std::string::npos ||
+                find_with_boundary(lineLower, "ksu") ||
+                lineLower.find("apatch") != std::string::npos ||
+                lineLower.find("overlay") != std::string::npos) {
                 fclose(fp);
                 return false;  // Suspicious mount found
             }
@@ -641,10 +687,14 @@ Java_com_xff_launch_detector_NativeDetector_checkMountNamespaceSyscall(JNIEnv *e
     // Check for suspicious mounts
     bool suspicious = false;
     suspicious |= (mounts.find("magisk") != std::string::npos);
-    suspicious |= (mounts.find("/su") != std::string::npos);
     suspicious |= (mounts.find("supersu") != std::string::npos);
-    suspicious |= (mounts.find("ksu") != std::string::npos);
     suspicious |= (mounts.find("apatch") != std::string::npos);
+    // Use boundary matching for short keywords to avoid false positives
+    // e.g. "/su" could match "/surface", "/suspend" etc.
+    std::string mountsLower = mounts;
+    for (char& c : mountsLower) c = tolower(c);
+    suspicious |= find_with_boundary(mountsLower, "su");
+    suspicious |= find_with_boundary(mountsLower, "ksu");
 
     // Check for overlay on system partitions (common root hiding technique)
     bool overlayOnSystem = false;
