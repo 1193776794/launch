@@ -1682,6 +1682,255 @@ Java_com_xff_launch_detector_NativeDetector_checkFunctionHook(JNIEnv *env, jobje
     return result;
 }
 
+// ===================== Same UID Process Scanning =====================
+
+/**
+ * Scan processes running under the same UID
+ * Enumerate all processes with the same UID (via /proc/[pid]/status),
+ * then check if their /data/data/<name> directory exists.
+ * Abnormal same-UID processes may indicate shared UID attacks.
+ *
+ * @return Number of suspicious same-UID processes found
+ */
+static int scan_same_uid_processes_impl(bool use_syscall) {
+    pid_t my_pid = getpid();
+    uid_t my_uid = getuid();
+    int count = 0;
+
+    // Open /proc directory
+    DIR* proc_dir = nullptr;
+    int proc_fd = -1;
+
+    if (use_syscall) {
+        proc_fd = syscall(__NR_openat, AT_FDCWD, "/proc", O_RDONLY | O_DIRECTORY);
+        if (proc_fd < 0) return 0;
+    } else {
+        proc_dir = opendir("/proc");
+        if (!proc_dir) return 0;
+    }
+
+    if (use_syscall) {
+        // Syscall-based directory enumeration
+        char dir_buf[4096];
+        while (true) {
+            int nread = syscall(__NR_getdents64, proc_fd, dir_buf, sizeof(dir_buf));
+            if (nread <= 0) break;
+
+            int pos = 0;
+            while (pos < nread) {
+                struct linux_dirent64* d = (struct linux_dirent64*)(dir_buf + pos);
+
+                // Only process numeric directories (PIDs)
+                if (d->d_type == DT_DIR && isdigit(d->d_name[0])) {
+                    int pid = atoi(d->d_name);
+                    if (pid > 0 && pid != my_pid) {
+                        // Read /proc/[pid]/status to get UID
+                        char status_path[256];
+                        snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
+                        std::string status_content = syscall_read_file(status_path, 4096);
+
+                        if (!status_content.empty()) {
+                            // Parse "Uid:\t<real>\t<effective>\t..."
+                            size_t uid_pos = status_content.find("Uid:");
+                            if (uid_pos != std::string::npos) {
+                                uid_t proc_uid = 0;
+                                sscanf(status_content.c_str() + uid_pos + 4, "%u", &proc_uid);
+
+                                if (proc_uid == my_uid) {
+                                    // Same UID process found, read cmdline
+                                    char cmdline_path[256];
+                                    snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%d/cmdline", pid);
+                                    std::string cmdline = syscall_read_file(cmdline_path, 256);
+
+                                    if (!cmdline.empty()) {
+                                        // Extract process name (first null-terminated string)
+                                        size_t null_pos = cmdline.find('\0');
+                                        if (null_pos != std::string::npos) {
+                                            cmdline = cmdline.substr(0, null_pos);
+                                        }
+
+                                        // Check if /data/data/<process_name> exists
+                                        // Skip self package name and common system processes
+                                        if (!cmdline.empty() && cmdline[0] != '/' &&
+                                            cmdline.find(':') == std::string::npos) {
+                                            char data_path[512];
+                                            snprintf(data_path, sizeof(data_path), "/data/data/%s", cmdline.c_str());
+
+                                            // Check directory existence via syscall
+                                            if (syscall_file_exists(data_path)) {
+                                                LOGD("[SameUID] Suspicious process: PID=%d, name=%s, data_dir=%s",
+                                                     pid, cmdline.c_str(), data_path);
+                                                count++;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                pos += d->d_reclen;
+            }
+        }
+        syscall(__NR_close, proc_fd);
+    } else {
+        // libc-based directory enumeration
+        struct dirent* entry;
+        while ((entry = readdir(proc_dir)) != nullptr) {
+            if (entry->d_type != DT_DIR || !isdigit(entry->d_name[0])) continue;
+
+            int pid = atoi(entry->d_name);
+            if (pid <= 0 || pid == my_pid) continue;
+
+            // Read /proc/[pid]/status to get UID
+            char status_path[256];
+            snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
+            FILE* status_fp = fopen(status_path, "r");
+            if (!status_fp) continue;
+
+            uid_t proc_uid = (uid_t)-1;
+            char line[256];
+            while (fgets(line, sizeof(line), status_fp)) {
+                if (strncmp(line, "Uid:", 4) == 0) {
+                    sscanf(line + 4, "%u", &proc_uid);
+                    break;
+                }
+            }
+            fclose(status_fp);
+
+            if (proc_uid != my_uid) continue;
+
+            // Same UID process found, read cmdline
+            char cmdline_path[256];
+            snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%d/cmdline", pid);
+            FILE* cmdline_fp = fopen(cmdline_path, "r");
+            if (!cmdline_fp) continue;
+
+            char cmdline[256] = {0};
+            size_t len = fread(cmdline, 1, sizeof(cmdline) - 1, cmdline_fp);
+            fclose(cmdline_fp);
+
+            if (len <= 0) continue;
+
+            // cmdline is null-terminated, extract first segment
+            std::string process_name(cmdline);
+
+            // Check if /data/data/<process_name> exists
+            // Skip paths (starting with /), sub-processes (containing :)
+            if (!process_name.empty() && process_name[0] != '/' &&
+                process_name.find(':') == std::string::npos) {
+                char data_path[512];
+                snprintf(data_path, sizeof(data_path), "/data/data/%s", process_name.c_str());
+
+                if (access(data_path, F_OK) == 0) {
+                    LOGD("[SameUID] Suspicious process: PID=%d, name=%s, data_dir=%s",
+                         pid, process_name.c_str(), data_path);
+                    count++;
+                }
+            }
+        }
+        closedir(proc_dir);
+    }
+
+    return count;
+}
+
+/**
+ * Get detailed info about same-UID processes
+ * Returns JSON with process details
+ */
+static std::string get_same_uid_process_details() {
+    pid_t my_pid = getpid();
+    uid_t my_uid = getuid();
+
+    std::string result = "[";
+    int count = 0;
+
+    DIR* proc_dir = opendir("/proc");
+    if (!proc_dir) return "[]";
+
+    struct dirent* entry;
+    while ((entry = readdir(proc_dir)) != nullptr && count < 20) {
+        if (entry->d_type != DT_DIR || !isdigit(entry->d_name[0])) continue;
+
+        int pid = atoi(entry->d_name);
+        if (pid <= 0 || pid == my_pid) continue;
+
+        // Read UID from /proc/[pid]/status
+        char status_path[256];
+        snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
+        std::string status_content = syscall_read_file(status_path, 4096);
+        if (status_content.empty()) continue;
+
+        size_t uid_pos = status_content.find("Uid:");
+        if (uid_pos == std::string::npos) continue;
+
+        uid_t proc_uid = 0;
+        sscanf(status_content.c_str() + uid_pos + 4, "%u", &proc_uid);
+        if (proc_uid != my_uid) continue;
+
+        // Read cmdline
+        char cmdline_path[256];
+        snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%d/cmdline", pid);
+        std::string cmdline = syscall_read_file(cmdline_path, 256);
+        if (cmdline.empty()) continue;
+
+        // Extract process name
+        size_t null_pos = cmdline.find('\0');
+        if (null_pos != std::string::npos) {
+            cmdline = cmdline.substr(0, null_pos);
+        }
+
+        // Skip sub-processes (containing :) and path-based names
+        if (cmdline.empty() || cmdline[0] == '/') continue;
+
+        // Check data directory
+        bool has_data_dir = false;
+        std::string process_base = cmdline;
+        size_t colon_pos = process_base.find(':');
+        if (colon_pos != std::string::npos) {
+            process_base = process_base.substr(0, colon_pos);
+        }
+
+        char data_path[512];
+        snprintf(data_path, sizeof(data_path), "/data/data/%s", process_base.c_str());
+        has_data_dir = (access(data_path, F_OK) == 0);
+
+        if (count > 0) result += ",";
+        result += "{\"pid\":" + std::to_string(pid) +
+                  ",\"name\":\"" + cmdline + "\"" +
+                  ",\"has_data_dir\":" + (has_data_dir ? "true" : "false") +
+                  ",\"data_path\":\"" + data_path + "\"}";
+        count++;
+    }
+    closedir(proc_dir);
+
+    result += "]";
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_xff_launch_detector_NativeDetector_scanSameUidProcessesNative(JNIEnv *env, jobject thiz) {
+    LOGD("[SameUID] Starting same UID process scan (native libc)");
+    int count = scan_same_uid_processes_impl(false);
+    LOGD("[SameUID] Native scan result: %d suspicious processes", count);
+    return count;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_xff_launch_detector_NativeDetector_scanSameUidProcessesSyscall(JNIEnv *env, jobject thiz) {
+    LOGD("[SameUID] Starting same UID process scan (syscall)");
+    int count = scan_same_uid_processes_impl(true);
+    LOGD("[SameUID] Syscall scan result: %d suspicious processes", count);
+    return count;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getSameUidProcessDetails(JNIEnv *env, jobject thiz) {
+    std::string details = get_same_uid_process_details();
+    return env->NewStringUTF(details.c_str());
+}
+
 // ===================== Compatibility Method =====================
 
 JNIEXPORT jstring JNICALL
