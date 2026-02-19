@@ -1393,6 +1393,39 @@ Java_com_xff_launch_detector_NativeDetector_detectTimingAnomaly(JNIEnv *env, job
     return (jboolean)detect_timing_anomaly(syscallTime, libcTime, threshold);
 }
 
+// ===================== KernelSU Side-Channel Detection =====================
+
+/**
+ * Perform KernelSU side-channel check and return anomaly ratio (0-100)
+ *
+ * Detection principle:
+ * - faccessat is hooked by KernelSU (in its syscall hook list)
+ * - fchownat is NOT hooked by KernelSU
+ * - Normal: faccessat is faster than fchownat
+ * - With KSU: faccessat is slower due to hook overhead
+ * - Collect 10000 samples, sort, compare: if >70% anomalous, KSU detected
+ */
+JNIEXPORT jint JNICALL
+Java_com_xff_launch_detector_NativeDetector_ksuSideChannelCheck(JNIEnv *env, jobject thiz) {
+    int anomaly_count = 0;
+    int total_samples = 0;
+
+    ksu_side_channel_check(&anomaly_count, &total_samples);
+
+    if (total_samples <= 0) return -1;
+
+    // Return percentage (0-100)
+    return (jint)((anomaly_count * 100) / total_samples);
+}
+
+/**
+ * Quick boolean check: is KernelSU detected via side-channel?
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_ksuSideChannelDetected(JNIEnv *env, jobject thiz) {
+    return (jboolean)ksu_side_channel_check(nullptr, nullptr);
+}
+
 // ===================== System Property =====================
 
 JNIEXPORT jstring JNICALL
