@@ -98,3 +98,25 @@ MultiLayerResult DebugDetector::detectPtrace() {
     result.syscallResult = false; // Can't check ptrace via syscall reliably
     return result;
 }
+
+// Anti-timing attack detection
+// Detects debugger breakpoints by measuring initialization elapsed time.
+// If a debugger inserts breakpoints during security initialization,
+// execution will take abnormally long (>= 2 seconds).
+// The caller should capture time_t at the start of initialization, then
+// call this method to check if too much time has elapsed.
+bool DebugDetector::checkInitTimingAttack(time_t initStartTime) {
+    time_t currentTime;
+    time(&currentTime);
+
+    time_t elapsed = currentTime - initStartTime;
+
+    if (elapsed >= 2) {
+        LOGD("🚨 Anti-timing attack: init took %ld seconds (>= 2s threshold), "
+             "debugger breakpoints suspected!", (long)elapsed);
+        return true;  // Timing attack detected
+    }
+
+    LOGD("Anti-timing: init completed in %ld seconds (normal)", (long)elapsed);
+    return false;  // Normal execution time
+}

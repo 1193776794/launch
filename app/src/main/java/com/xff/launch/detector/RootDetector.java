@@ -427,12 +427,9 @@ public class RootDetector {
         items.add(detectRootManagers());
         items.add(detectRootHiding());
         items.add(detectSuspiciousMounts());
-<<<<<<< HEAD
         items.add(detectMountsForMagisk());
         items.add(detectZygoteContext());
-=======
         items.add(detectSameUidProcesses());
->>>>>>> fba3cf9 (feat(root): add same-UID process scanning detection)
         return items;
     }
 
