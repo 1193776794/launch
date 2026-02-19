@@ -121,7 +121,7 @@ public class SideChannelDetector {
             // Set layer results
             item.setLayerResult(DetectionLayer.JAVA, false);  // Java layer N/A
             item.setLayerResult(DetectionLayer.NATIVE, isHooked);
-            item.setLayerResult(DetectionLayer.SYSCALL, !isHooked);
+            item.setLayerResult(DetectionLayer.SYSCALL, isHooked);
 
             if (isHooked) {
                 item.setStatus(DetectionStatus.RISK);
@@ -157,7 +157,7 @@ public class SideChannelDetector {
 
             item.setLayerResult(DetectionLayer.JAVA, false);
             item.setLayerResult(DetectionLayer.NATIVE, isHooked);
-            item.setLayerResult(DetectionLayer.SYSCALL, !isHooked);
+            item.setLayerResult(DetectionLayer.SYSCALL, isHooked);
 
             if (isHooked) {
                 item.setStatus(DetectionStatus.RISK);
@@ -193,7 +193,7 @@ public class SideChannelDetector {
 
             item.setLayerResult(DetectionLayer.JAVA, false);
             item.setLayerResult(DetectionLayer.NATIVE, isHooked);
-            item.setLayerResult(DetectionLayer.SYSCALL, !isHooked);
+            item.setLayerResult(DetectionLayer.SYSCALL, isHooked);
 
             if (isHooked) {
                 item.setStatus(DetectionStatus.RISK);
