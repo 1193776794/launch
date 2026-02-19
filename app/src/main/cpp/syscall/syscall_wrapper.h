@@ -399,4 +399,234 @@ static inline bool detect_timing_anomaly(long long syscall_time, long long libc_
     return ratio > threshold_multiplier;
 }
 
+// ===================== KernelSU Side-Channel Detection =====================
+// Timing side-channel detection for KernelSU kernel-level syscall hooks.
+//
+// Key insight: KernelSU hooks __NR_faccessat (syscall 48 on ARM64) to intercept
+// file access checks. __NR_fchownat is NOT hooked by KernelSU.
+// Normally, faccessat is faster than fchownat. If faccessat is hooked by KernelSU,
+// it will consistently be slower than fchownat due to the hook overhead.
+//
+// Detection flow:
+// 1. Collect N timing samples for both faccessat and fchownat
+// 2. Sort both arrays to reduce noise and extreme outliers
+// 3. Compare element-by-element: count how many times faccessat > fchownat + 1
+// 4. If anomaly count exceeds threshold (70%), KernelSU hook is likely present
+
+#include <cstdlib>
+#include <cstring>
+#include <sched.h>
+
+// Number of timing samples to collect
+#define KSU_NUM_SAMPLES 10000
+
+// Anomaly threshold: 7000 out of 10000 (70%)
+// Threshold 0x1B58 = 7000
+#define KSU_ANOMALY_THRESHOLD 7000
+
+/**
+ * Read hardware counter for precise timing (ARM64 only)
+ * Uses ISB + CNTVCT_EL0 + ISB pattern for nanosecond-level accuracy.
+ *
+ * On non-ARM64, falls back to CLOCK_MONOTONIC_RAW
+ */
+static inline uint64_t ksu_read_counter() {
+#if defined(__aarch64__)
+    uint64_t val;
+    // ISB ensures all previous instructions complete before reading counter
+    __asm__ volatile("isb" ::: "memory");
+    // Read virtual counter register (CNTVCT_EL0) for nanosecond precision
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(val));
+    __asm__ volatile("isb" ::: "memory");
+    return val;
+#else
+    // Fallback for non-ARM64 architectures
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+/**
+ * Comparator for qsort - ascending order for int64_t timing values
+ */
+static int ksu_compare_int64(const void* a, const void* b) {
+    int64_t va = *(const int64_t*)a;
+    int64_t vb = *(const int64_t*)b;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+    return 0;
+}
+
+/**
+ * Try to bind current thread to a performance (big) core for stable measurements.
+ *
+ * @return true if successfully bound to a big core
+ */
+static inline bool ksu_bind_big_core() {
+    // Read CPU max frequencies to identify big cores
+    int max_freq = 0;
+    int big_core = -1;
+    int num_cpus = sysconf(_SC_NPROCESSORS_CONF);
+
+    if (num_cpus < 2) return false;
+
+    for (int i = 0; i < num_cpus && i < 16; i++) {
+        char path[128];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+
+        int fd = (int)syscall_raw(__NR_openat, AT_FDCWD, (long)path, O_RDONLY, 0);
+        if (fd < 0) continue;
+
+        char buf[32] = {0};
+        ssize_t n = (ssize_t)syscall_raw(__NR_read, fd, (long)buf, sizeof(buf) - 1);
+        syscall_raw(__NR_close, fd);
+
+        if (n > 0) {
+            int freq = atoi(buf);
+            if (freq > max_freq) {
+                max_freq = freq;
+                big_core = i;
+            }
+        }
+    }
+
+    if (big_core >= 0) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(big_core, &cpuset);
+        return sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) == 0;
+    }
+
+    return false;
+}
+
+/**
+ * Restore CPU affinity to allow scheduling on all cores
+ */
+static inline void ksu_restore_affinity() {
+    int num_cpus = sysconf(_SC_NPROCESSORS_CONF);
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    for (int i = 0; i < num_cpus && i < 16; i++) {
+        CPU_SET(i, &cpuset);
+    }
+    sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+}
+
+/**
+ * Collect timing samples for __NR_faccessat syscall.
+ * faccessat(dirfd=-1, pathname=NULL, mode=-1, flags=0)
+ * Intentionally invalid args for fast failure.
+ *
+ * @param samples Output array (must be at least KSU_NUM_SAMPLES * sizeof(int64_t))
+ */
+static inline void ksu_collect_faccessat_timing(int64_t* samples) {
+    for (int i = 0; i < KSU_NUM_SAMPLES; i++) {
+        uint64_t start = ksu_read_counter();
+        // Call faccessat with invalid args - will fail immediately but still enters kernel
+        // The hook overhead is incurred regardless of success/failure
+        // Args: dirfd=-1, pathname=NULL, mode=-1, flags=0
+        syscall_raw(__NR_faccessat, (long)-1, 0, (long)-1, 0);
+        uint64_t end = ksu_read_counter();
+        samples[i] = (int64_t)(end - start);
+    }
+}
+
+/**
+ * Collect timing samples for __NR_fchownat syscall.
+ * fchownat(dirfd=-1, pathname=NULL, owner=0, group=0, flags=-1)
+ * Intentionally invalid args for fast failure.
+ * This syscall is NOT hooked by KernelSU, serves as baseline reference.
+ *
+ * @param samples Output array (must be at least KSU_NUM_SAMPLES * sizeof(int64_t))
+ */
+static inline void ksu_collect_fchownat_timing(int64_t* samples) {
+    for (int i = 0; i < KSU_NUM_SAMPLES; i++) {
+        uint64_t start = ksu_read_counter();
+        // Call fchownat with invalid args - NOT hooked by KernelSU
+        // Args: dirfd=-1, pathname=NULL, owner=0, group=0, flags=-1
+        syscall_raw(__NR_fchownat, (long)-1, 0, 0, 0, (long)-1);
+        uint64_t end = ksu_read_counter();
+        samples[i] = (int64_t)(end - start);
+    }
+}
+
+/**
+ * Core KernelSU side-channel detection.
+ *
+ * 1. Bind to big core for stable measurements
+ * 2. Allocate sample arrays for faccessat and fchownat
+ * 3. Collect timing samples for both syscalls
+ * 4. Sort both arrays (qsort) to reduce noise
+ * 5. Compare sorted arrays element-by-element:
+ *    Count anomalies where faccessat_time > fchownat_time + 1
+ * 6. If anomaly count > threshold (7000/10000 = 70%), KSU detected
+ *
+ * @param out_anomaly_count  Output: number of anomalies detected
+ * @param out_total_samples  Output: total samples compared
+ * @return true if KernelSU hook detected (anomaly_count > threshold)
+ */
+static inline bool ksu_side_channel_check(int* out_anomaly_count, int* out_total_samples) {
+    // Phase 1: Bind to big core for stable measurement
+    bool bound = ksu_bind_big_core();
+
+    // Phase 2: Allocate and zero timing arrays
+    // Original uses malloc(80000) = 10000 * 8 bytes (int64_t)
+    int64_t* faccessat_times = (int64_t*)malloc(KSU_NUM_SAMPLES * sizeof(int64_t));
+    int64_t* fchownat_times = (int64_t*)malloc(KSU_NUM_SAMPLES * sizeof(int64_t));
+
+    if (!faccessat_times || !fchownat_times) {
+        free(faccessat_times);
+        free(fchownat_times);
+        if (out_anomaly_count) *out_anomaly_count = 0;
+        if (out_total_samples) *out_total_samples = 0;
+        if (bound) ksu_restore_affinity();
+        return false;
+    }
+
+    memset(faccessat_times, 0, KSU_NUM_SAMPLES * sizeof(int64_t));
+    memset(fchownat_times, 0, KSU_NUM_SAMPLES * sizeof(int64_t));
+
+    // Phase 3: Collect timing samples
+    ksu_collect_faccessat_timing(faccessat_times);
+    ksu_collect_fchownat_timing(fchownat_times);
+
+    // Phase 4: Sort both arrays to reduce extreme value impact
+    qsort(faccessat_times, KSU_NUM_SAMPLES, sizeof(int64_t), ksu_compare_int64);
+    qsort(fchownat_times, KSU_NUM_SAMPLES, sizeof(int64_t), ksu_compare_int64);
+
+    // Phase 5: Compare sorted arrays element-by-element
+    // Original uses NEON vectorized comparison for performance
+    // Simplified equivalent:
+    //   if (faccessat[i] > fchownat[i] + 1) anomaly++
+    //
+    // Rationale: Normally faccessat should be FASTER than fchownat
+    // because faccessat is a simpler operation (just check access).
+    // If faccessat is consistently SLOWER, it means there's a hook
+    // adding overhead (KernelSU hooks faccessat, not fchownat).
+    int anomaly_count = 0;
+    for (int i = 0; i < KSU_NUM_SAMPLES; i++) {
+        if (faccessat_times[i] > fchownat_times[i] + 1) {
+            anomaly_count++;
+        }
+    }
+
+    // Phase 6: Cleanup
+    free(faccessat_times);
+    free(fchownat_times);
+
+    // Restore CPU affinity
+    if (bound) ksu_restore_affinity();
+
+    // Output results
+    if (out_anomaly_count) *out_anomaly_count = anomaly_count;
+    if (out_total_samples) *out_total_samples = KSU_NUM_SAMPLES;
+
+    // Phase 7: Threshold check
+    // Original: if (v24 > 0x1B58) => if (anomaly > 7000)
+    return anomaly_count > KSU_ANOMALY_THRESHOLD;
+}
+
 #endif // LAUNCH_SYSCALL_WRAPPER_H
