@@ -66,6 +66,12 @@ public:
     static MultiLayerResult detectZygisk();  // 改为通用 Zygisk 检测
     static MultiLayerResult detectSmapsHook();  // SMAPS 内存取证检测
     static MultiLayerResult detectMemoryHooks();
+    static MultiLayerResult detectDumpArtMethodHook();  // DumpArtMethod Hook 检测
+
+    // DumpArtMethod Hook Detection
+    // Scans /proc/self/maps for dumpArtMethod symbol - indicates ART method dumping tools
+    static bool checkDumpArtMethodHookNative();
+    static bool checkDumpArtMethodHookSyscall();
 };
 
 #endif // LAUNCH_HOOK_DETECTOR_H
