@@ -305,6 +305,27 @@ public class NativeDetector {
      */
     public native boolean detectTimingAnomaly(long syscallTime, long libcTime, float threshold);
 
+    // ===================== Same UID Process Scanning =====================
+
+    /**
+     * Scan processes running under the same UID via native libc
+     * Checks if other same-UID processes have /data/data/<name> directories
+     * @return Number of suspicious same-UID processes found
+     */
+    public native int scanSameUidProcessesNative();
+
+    /**
+     * Scan processes running under the same UID via direct syscall
+     * @return Number of suspicious same-UID processes found
+     */
+    public native int scanSameUidProcessesSyscall();
+
+    /**
+     * Get detailed information about same-UID processes
+     * @return JSON string with process details (pid, name, data_dir existence)
+     */
+    public native String getSameUidProcessDetails();
+
     // Singleton instance
     private static NativeDetector instance;
 
