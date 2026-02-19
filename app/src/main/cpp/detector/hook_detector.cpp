@@ -1282,3 +1282,92 @@ MultiLayerResult HookDetector::detectMemoryHooks() {
     result.syscallResult = checkMapsForHooksSyscall() || checkFridaMemorySyscall();
     return result;
 }
+
+// ===================== DumpArtMethod Hook Detection =====================
+//
+// The dumpArtMethod symbol is used by ART method dumping/hooking tools:
+//   - FDex2: Dumps DEX files from memory
+//   - DexDump: ART method dumping
+//   - Various ART hooking frameworks that patch ArtMethod structures
+//
+// Detection: Read /proc/self/maps and search for "dumpArtMethod" symbol
+// If found, it means a hooking tool has injected a library that exports
+// (or references) the dumpArtMethod function.
+
+bool HookDetector::checkDumpArtMethodHookNative() {
+    LOGD("=== checkDumpArtMethodHookNative() START ===");
+
+    // Read /proc/self/maps using libc
+    std::ifstream maps("/proc/self/maps");
+    if (!maps.is_open()) {
+        LOGD("Failed to open /proc/self/maps (native)");
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(maps, line)) {
+        // Search for dumpArtMethod symbol in memory maps
+        if (line.find("dumpArtMethod") != std::string::npos) {
+            LOGD("🚨 [DETECTED] dumpArtMethod found in maps (native): %s", line.c_str());
+            maps.close();
+            return true;
+        }
+
+        // Also check for related dumping tool signatures
+        if (line.find("libdexdump") != std::string::npos ||
+            line.find("libFDex2") != std::string::npos ||
+            line.find("fdex2") != std::string::npos ||
+            line.find("dexdump") != std::string::npos ||
+            line.find("libdexhunter") != std::string::npos ||
+            line.find("dexhunter") != std::string::npos ||
+            line.find("libunpacker") != std::string::npos) {
+            LOGD("🚨 [DETECTED] ART dumping tool found in maps (native): %s", line.c_str());
+            maps.close();
+            return true;
+        }
+    }
+
+    maps.close();
+    LOGD("=== checkDumpArtMethodHookNative() END - Clean ===");
+    return false;
+}
+
+bool HookDetector::checkDumpArtMethodHookSyscall() {
+    LOGD("=== checkDumpArtMethodHookSyscall() START ===");
+
+    // Read /proc/self/maps using direct syscall (bypass libc hooks)
+    std::string maps = syscall_read_file("/proc/self/maps", 131072);  // 128KB
+    if (maps.empty()) {
+        LOGD("Failed to read /proc/self/maps (syscall)");
+        return false;
+    }
+
+    // Search for dumpArtMethod symbol
+    if (maps.find("dumpArtMethod") != std::string::npos) {
+        LOGD("🚨 [DETECTED] dumpArtMethod found in maps (syscall)");
+        return true;
+    }
+
+    // Also check for related dumping tool signatures
+    if (maps.find("libdexdump") != std::string::npos ||
+        maps.find("libFDex2") != std::string::npos ||
+        maps.find("fdex2") != std::string::npos ||
+        maps.find("dexdump") != std::string::npos ||
+        maps.find("libdexhunter") != std::string::npos ||
+        maps.find("dexhunter") != std::string::npos ||
+        maps.find("libunpacker") != std::string::npos) {
+        LOGD("🚨 [DETECTED] ART dumping tool found in maps (syscall)");
+        return true;
+    }
+
+    LOGD("=== checkDumpArtMethodHookSyscall() END - Clean ===");
+    return false;
+}
+
+MultiLayerResult HookDetector::detectDumpArtMethodHook() {
+    MultiLayerResult result;
+    result.javaResult = false;
+    result.nativeResult = checkDumpArtMethodHookNative();
+    result.syscallResult = checkDumpArtMethodHookSyscall();
+    return result;
+}

@@ -1617,4 +1617,52 @@ Java_com_xff_launch_MainActivity_stringFromJNI(JNIEnv *env, jobject thiz) {
     return env->NewStringUTF("Launch - 设备环境检测");
 }
 
+// ===================== Anti-Timing Attack Detection =====================
+
+/**
+ * Capture current time for anti-timing attack measurement
+ * Call this at the START of security initialization
+ * @return Current time as seconds since epoch (to pass to checkInitTimingAttack)
+ */
+JNIEXPORT jlong JNICALL
+Java_com_xff_launch_detector_NativeDetector_captureInitStartTime(JNIEnv *env, jobject thiz) {
+    time_t timer;
+    time(&timer);
+    return (jlong)timer;
+}
+
+/**
+ * Check if security initialization took too long (>= 2 seconds)
+ * This indicates debugger breakpoints were inserted during initialization
+ * @param initStartTime The value returned by captureInitStartTime()
+ * @return true if timing attack detected (init took >= 2 seconds)
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkInitTimingAttack(JNIEnv *env, jobject thiz,
+                                                                   jlong initStartTime) {
+    return DebugDetector::checkInitTimingAttack((time_t)initStartTime);
+}
+
+// ===================== DumpArtMethod Hook Detection =====================
+
+/**
+ * Check for dumpArtMethod hook via native (libc)
+ * Scans /proc/self/maps for dumpArtMethod symbol and related dumping tools
+ * @return true if dumpArtMethod hook detected
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkDumpArtMethodHookNative(JNIEnv *env, jobject thiz) {
+    return HookDetector::checkDumpArtMethodHookNative();
+}
+
+/**
+ * Check for dumpArtMethod hook via direct syscall
+ * Same check but using direct syscall to bypass libc hooks
+ * @return true if dumpArtMethod hook detected
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkDumpArtMethodHookSyscall(JNIEnv *env, jobject thiz) {
+    return HookDetector::checkDumpArtMethodHookSyscall();
+}
+
 } // extern "C"

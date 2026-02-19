@@ -305,6 +305,41 @@ public class NativeDetector {
      */
     public native boolean detectTimingAnomaly(long syscallTime, long libcTime, float threshold);
 
+    // ===================== Anti-Timing Attack Detection =====================
+
+    /**
+     * Capture current time for anti-timing attack measurement.
+     * Call this at the START of security initialization.
+     * @return Current time as seconds since epoch
+     */
+    public native long captureInitStartTime();
+
+    /**
+     * Check if security initialization took too long (>= 2 seconds).
+     * If initialization is suspiciously slow, it indicates a debugger has
+     * inserted breakpoints during the process.
+     * @param initStartTime The value returned by captureInitStartTime()
+     * @return true if timing attack detected (init took >= 2 seconds)
+     */
+    public native boolean checkInitTimingAttack(long initStartTime);
+
+    // ===================== DumpArtMethod Hook Detection =====================
+
+    /**
+     * Check for dumpArtMethod hook via native (libc).
+     * Scans /proc/self/maps for dumpArtMethod symbol and related
+     * ART method dumping tools (FDex2, DexDump, DexHunter, etc.)
+     * @return true if dumpArtMethod hook detected
+     */
+    public native boolean checkDumpArtMethodHookNative();
+
+    /**
+     * Check for dumpArtMethod hook via direct syscall.
+     * Same check but using direct syscall to bypass libc hooks.
+     * @return true if dumpArtMethod hook detected
+     */
+    public native boolean checkDumpArtMethodHookSyscall();
+
     // Singleton instance
     private static NativeDetector instance;
 
