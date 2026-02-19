@@ -22,6 +22,15 @@ public:
 
     // Get TracerPid value
     static int getTracerPid();
+
+    // Suspicious tool path detection
+    // Detects debuggers, injection tools, Frida gadgets, unpackers, etc.
+    static bool checkSuspiciousToolPathsNative();
+    static bool checkSuspiciousToolPathsSyscall();
+    static std::string getDetectedSuspiciousToolPaths();
+
+    // Combined detection for suspicious tool paths
+    static MultiLayerResult detectSuspiciousToolPaths();
 };
 
 #endif // LAUNCH_DEBUG_DETECTOR_H
