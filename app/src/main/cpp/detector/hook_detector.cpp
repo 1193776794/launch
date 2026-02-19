@@ -6,12 +6,24 @@
 #include <fstream>
 #include <sstream>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <android/log.h>
 #include <algorithm>
 #include <set>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <linux/limits.h>
+
+// linux_dirent64 structure definition (not directly exposed by NDK)
+struct linux_dirent64 {
+    uint64_t        d_ino;
+    int64_t         d_off;
+    unsigned short  d_reclen;
+    unsigned char   d_type;
+    char            d_name[0];
+};
 
 #define LOG_TAG "HookDetector"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -116,7 +128,10 @@ bool HookDetector::checkFridaMemoryNative() {
         if (line.find("frida") != std::string::npos ||
             line.find("gadget") != std::string::npos ||
             line.find("gum-js-loop") != std::string::npos ||
-            line.find("LIBFRIDA") != std::string::npos) {
+            line.find("LIBFRIDA") != std::string::npos ||
+            line.find("frida-agent-32") != std::string::npos ||
+            line.find("frida-agent-64") != std::string::npos ||
+            line.find("frida-agent") != std::string::npos) {
             LOGD("Frida memory signature found (native): %s", line.c_str());
             return true;
         }
@@ -281,7 +296,10 @@ bool HookDetector::checkFridaMemorySyscall() {
     if (content.find("frida") != std::string::npos ||
         content.find("gadget") != std::string::npos ||
         content.find("gum-js-loop") != std::string::npos ||
-        content.find("LIBFRIDA") != std::string::npos) {
+        content.find("LIBFRIDA") != std::string::npos ||
+        content.find("frida-agent-32") != std::string::npos ||
+        content.find("frida-agent-64") != std::string::npos ||
+        content.find("frida-agent") != std::string::npos) {
         LOGD("Frida memory signature found (syscall)");
         return true;
     }
@@ -418,15 +436,164 @@ bool HookDetector::checkFridaThreads() {
             if (threadName.find("gmain") != std::string::npos ||
                 threadName.find("gdbus") != std::string::npos ||
                 threadName.find("gum-js-loop") != std::string::npos ||
-                threadName.find("pool-frida") != std::string::npos) {
+                threadName.find("pool-frida") != std::string::npos ||
+                threadName.find("linjector") != std::string::npos) {
                 LOGD("Frida thread found: %s", threadName.c_str());
                 closedir(dir);
                 return true;
             }
         }
+
+        // Also read Name field from /proc/self/task/<tid>/status via syscall
+        // This approach is harder to intercept by hooking than reading comm
+        std::string tidStatusPath = "/proc/self/task/" + std::string(entry->d_name) + "/status";
+        std::string statusContent = syscall_read_file(tidStatusPath.c_str(), 1024);
+        if (!statusContent.empty()) {
+            // Find the "Name:" line
+            size_t namePos = statusContent.find("Name:");
+            if (namePos != std::string::npos) {
+                size_t lineEnd = statusContent.find('\n', namePos);
+                std::string nameLine = statusContent.substr(namePos + 5,
+                    lineEnd != std::string::npos ? lineEnd - namePos - 5 : std::string::npos);
+                // Trim leading/trailing whitespace
+                size_t start = nameLine.find_first_not_of(" \t");
+                if (start != std::string::npos) {
+                    nameLine = nameLine.substr(start);
+                }
+                if (nameLine.find("linjector") != std::string::npos ||
+                    nameLine.find("gmain") != std::string::npos) {
+                    LOGD("Frida thread found via syscall status: %s (tid: %s)",
+                         nameLine.c_str(), entry->d_name);
+                    closedir(dir);
+                    return true;
+                }
+            }
+        }
     }
     closedir(dir);
     return false;
+}
+
+// ===================== /proc/net/tcp IDA Port Scanning =====================
+
+/**
+ * Detect IDA Pro android_server port (23946 = 0x5D8A) by parsing /proc/net/tcp
+ * Uses libc file I/O
+ */
+bool HookDetector::checkIdaPortTcpNative() {
+    std::ifstream tcp("/proc/net/tcp");
+    if (!tcp.is_open()) return false;
+
+    std::string line;
+    while (std::getline(tcp, line)) {
+        // /proc/net/tcp format: sl local_address rem_address ...
+        // local_address format: IP:PORT (hex)
+        // IDA default port 23946 = 0x5D8A
+        if (line.find(":5D8A") != std::string::npos) {
+            LOGD("IDA port 23946 (0x5D8A) found in /proc/net/tcp (native): %s", line.c_str());
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Detect IDA port by reading /proc/net/tcp via syscall
+ * Uses direct syscall to bypass libc hooks
+ */
+bool HookDetector::checkIdaPortTcpSyscall() {
+    std::string content = syscall_read_file("/proc/net/tcp", 65536);
+    if (content.empty()) return false;
+
+    if (content.find(":5D8A") != std::string::npos) {
+        LOGD("IDA port 23946 (0x5D8A) found in /proc/net/tcp (syscall)");
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Detect Frida default port (27042 = 0x69A2) by parsing /proc/net/tcp
+ * Uses libc file I/O
+ */
+bool HookDetector::checkFridaPortTcpNative() {
+    std::ifstream tcp("/proc/net/tcp");
+    if (!tcp.is_open()) return false;
+
+    std::string line;
+    while (std::getline(tcp, line)) {
+        // Frida default port 27042 = 0x69A2
+        // Frida alternate port 27043 = 0x69A3
+        if (line.find(":69A2") != std::string::npos ||
+            line.find(":69A3") != std::string::npos) {
+            LOGD("Frida port found in /proc/net/tcp (native): %s", line.c_str());
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Detect Frida port by reading /proc/net/tcp via syscall
+ */
+bool HookDetector::checkFridaPortTcpSyscall() {
+    std::string content = syscall_read_file("/proc/net/tcp", 65536);
+    if (content.empty()) return false;
+
+    if (content.find(":69A2") != std::string::npos ||
+        content.find(":69A3") != std::string::npos) {
+        LOGD("Frida port found in /proc/net/tcp (syscall)");
+        return true;
+    }
+    return false;
+}
+
+// ===================== FD linjector Scanning =====================
+
+/**
+ * Scan /proc/self/fd via syscall(readlinkat) for linjector
+ */
+bool HookDetector::checkFridaFdLinjectorSyscall() {
+    // Open /proc/self/fd directory using syscall
+    int dirFd = syscall(__NR_openat, AT_FDCWD, "/proc/self/fd", O_RDONLY | O_DIRECTORY);
+    if (dirFd < 0) return false;
+
+    char buffer[4096];
+    char linkPath[64];
+    char targetPath[PATH_MAX];
+    bool found = false;
+
+    while (true) {
+        int nread = syscall(__NR_getdents64, dirFd, buffer, sizeof(buffer));
+        if (nread <= 0) break;
+
+        int pos = 0;
+        while (pos < nread) {
+            struct linux_dirent64* d = (struct linux_dirent64*)(buffer + pos);
+
+            if (d->d_name[0] != '.') {
+                snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%s", d->d_name);
+
+                ssize_t len = syscall(__NR_readlinkat, AT_FDCWD, linkPath,
+                                      targetPath, sizeof(targetPath) - 1);
+                if (len > 0) {
+                    targetPath[len] = '\0';
+                    // Search for linjector (Frida injector pipe/file)
+                    if (strstr(targetPath, "linjector") != nullptr) {
+                        LOGD("Frida linjector FD found: %s -> %s", linkPath, targetPath);
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            pos += d->d_reclen;
+        }
+        if (found) break;
+    }
+
+    syscall(__NR_close, dirFd);
+    return found;
 }
 
 // Get detailed LSPosed injection information
@@ -1158,7 +1325,7 @@ bool HookDetector::checkZygiskSyscall() {
     LOGD("[6/7] 检测 Zygote 注入 (分析父进程)...");
     std::string statContent = syscall_read_file("/proc/self/stat", 1024);
     if (!statContent.empty()) {
-        LOGD("  ├─ 成功读取 /proc/self/stat: %lu 字节", statContent.size());
+        LOGD("  ├─ 成功读取 /proc/self/stat: %zu 字节", statContent.size());
 
         // Parse PPID
         std::istringstream iss(statContent);
@@ -1240,8 +1407,10 @@ MultiLayerResult HookDetector::detectFrida() {
     MultiLayerResult result;
     result.javaResult = false;
     result.nativeResult = checkFridaNative() || checkFridaPortsNative() ||
-                          checkFridaMemoryNative() || checkFridaThreads();
-    result.syscallResult = checkFridaSyscall() || checkFridaMemorySyscall();
+                          checkFridaMemoryNative() || checkFridaThreads() ||
+                          checkFridaPortTcpNative();
+    result.syscallResult = checkFridaSyscall() || checkFridaMemorySyscall() ||
+                           checkFridaPortTcpSyscall() || checkFridaFdLinjectorSyscall();
     return result;
 }
 

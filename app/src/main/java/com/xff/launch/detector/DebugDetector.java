@@ -547,6 +547,18 @@ public class DebugDetector {
                         line.trim(),
                         DetectionLayer.SYSCALL, "🔍");
                 }
+                // IDA Pro android_server 默认端口 23946 = 0x5D8A
+                if (line.contains(":5D8A")) {
+                    item.addDetectionDetail("🌐 IDA 端口", "/proc/net/tcp",
+                        "检测到 IDA Pro 端口 23946 (0x5D8A): " + line.trim(),
+                        DetectionLayer.JAVA, "🔌");
+                }
+                // Frida 默认端口 27042 = 0x69A2, 27043 = 0x69A3
+                if (line.contains(":69A2") || line.contains(":69A3")) {
+                    item.addDetectionDetail("🌐 Frida 端口", "/proc/net/tcp",
+                        "检测到 Frida 端口: " + line.trim(),
+                        DetectionLayer.JAVA, "🔌");
+                }
             }
             reader.close();
         } catch (Exception ignored) {

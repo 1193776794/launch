@@ -74,6 +74,20 @@ public class NativeDetector {
     public native boolean checkZygiskNative();
     public native boolean checkZygiskSyscall();
 
+    // /proc/net/tcp port scanning (IDA & Frida)
+    /** Detect IDA port 23946 (0x5D8A) via /proc/net/tcp - native */
+    public native boolean checkIdaPortTcpNative();
+    /** Detect IDA port 23946 (0x5D8A) via /proc/net/tcp - syscall */
+    public native boolean checkIdaPortTcpSyscall();
+    /** Detect Frida port 27042 (0x69A2) via /proc/net/tcp - native */
+    public native boolean checkFridaPortTcpNative();
+    /** Detect Frida port 27042 (0x69A2) via /proc/net/tcp - syscall */
+    public native boolean checkFridaPortTcpSyscall();
+
+    // Frida FD linjector detection
+    /** Scan /proc/self/fd via syscall(readlinkat) for linjector injector */
+    public native boolean checkFridaFdLinjectorSyscall();
+
     // ===================== Emulator Detection =====================
 
     public native boolean checkEmulatorNative();
