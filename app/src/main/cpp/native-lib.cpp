@@ -143,6 +143,28 @@ Java_com_xff_launch_detector_NativeDetector_checkMountInfoSyscall(JNIEnv *env, j
     return RootDetector::checkMountInfoSyscall();
 }
 
+// /proc/mounts Magisk signature detection
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkMountsForMagiskNative(JNIEnv *env, jobject thiz) {
+    return RootDetector::checkMountsForMagiskNative();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkMountsForMagiskSyscall(JNIEnv *env, jobject thiz) {
+    return RootDetector::checkMountsForMagiskSyscall();
+}
+
+// Zygote SELinux context detection via /proc/self/attr/prev
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkZygoteContextNative(JNIEnv *env, jobject thiz) {
+    return RootDetector::checkZygoteContextNative();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkZygoteContextSyscall(JNIEnv *env, jobject thiz) {
+    return RootDetector::checkZygoteContextSyscall();
+}
+
 // ===================== Hook Detection =====================
 
 JNIEXPORT jboolean JNICALL
