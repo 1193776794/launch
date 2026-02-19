@@ -133,9 +133,9 @@ public class ReadlinkDetector {
             // Check consistency between layers
             boolean consistent = nativeExePath.equals(syscallExePath);
 
-            item.setLayerResult(DetectionLayer.JAVA, !javaRisk && javaOk);
-            item.setLayerResult(DetectionLayer.NATIVE, !nativeRisk && nativeOk);
-            item.setLayerResult(DetectionLayer.SYSCALL, !syscallRisk && syscallOk);
+            item.setLayerResult(DetectionLayer.JAVA, javaRisk || !javaOk);
+            item.setLayerResult(DetectionLayer.NATIVE, nativeRisk || !nativeOk);
+            item.setLayerResult(DetectionLayer.SYSCALL, syscallRisk || !syscallOk);
 
             if (javaRisk || nativeRisk || syscallRisk) {
                 item.setStatus(DetectionStatus.RISK);
@@ -174,9 +174,9 @@ public class ReadlinkDetector {
             // Check for hidden mappings (indication of hook framework)
             boolean hasHiddenMaps = nativeDetector.checkHiddenMapsSyscall();
 
-            item.setLayerResult(DetectionLayer.JAVA, hasContent);
-            item.setLayerResult(DetectionLayer.NATIVE, !hasSuspicious);
-            item.setLayerResult(DetectionLayer.SYSCALL, !hasHiddenMaps);
+            item.setLayerResult(DetectionLayer.JAVA, !hasContent);
+            item.setLayerResult(DetectionLayer.NATIVE, hasSuspicious);
+            item.setLayerResult(DetectionLayer.SYSCALL, hasHiddenMaps);
 
             if (hasHiddenMaps) {
                 item.setStatus(DetectionStatus.RISK);
@@ -216,9 +216,9 @@ public class ReadlinkDetector {
             boolean hasBindMount = mountContent.contains("magisk") ||
                     mountContent.contains("ksu") || mountContent.contains("apatch");
 
-            item.setLayerResult(DetectionLayer.JAVA, true);
-            item.setLayerResult(DetectionLayer.NATIVE, !hasOverlay);
-            item.setLayerResult(DetectionLayer.SYSCALL, !hasBindMount);
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, hasOverlay);
+            item.setLayerResult(DetectionLayer.SYSCALL, hasBindMount);
 
             if (hasBindMount) {
                 item.setStatus(DetectionStatus.RISK);
@@ -253,9 +253,9 @@ public class ReadlinkDetector {
             boolean syscallOk = "/".equals(syscallRoot);
             boolean consistent = nativeRoot.equals(syscallRoot);
 
-            item.setLayerResult(DetectionLayer.JAVA, true);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeOk);
-            item.setLayerResult(DetectionLayer.SYSCALL, syscallOk);
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, !nativeOk);
+            item.setLayerResult(DetectionLayer.SYSCALL, !syscallOk);
 
             if (!syscallOk) {
                 item.setStatus(DetectionStatus.RISK);
@@ -289,9 +289,9 @@ public class ReadlinkDetector {
             boolean hasSuspicious = containsSuspicious(syscallCwd);
             boolean consistent = nativeCwd.equals(syscallCwd);
 
-            item.setLayerResult(DetectionLayer.JAVA, true);
-            item.setLayerResult(DetectionLayer.NATIVE, !containsSuspicious(nativeCwd));
-            item.setLayerResult(DetectionLayer.SYSCALL, !hasSuspicious);
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, containsSuspicious(nativeCwd));
+            item.setLayerResult(DetectionLayer.SYSCALL, hasSuspicious);
 
             if (hasSuspicious) {
                 item.setStatus(DetectionStatus.RISK);
@@ -325,9 +325,9 @@ public class ReadlinkDetector {
             // Also check via native
             int nativeFdCount = nativeDetector.checkSuspiciousFdsNative();
 
-            item.setLayerResult(DetectionLayer.JAVA, true);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeFdCount == 0);
-            item.setLayerResult(DetectionLayer.SYSCALL, suspiciousFdCount == 0);
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, nativeFdCount != 0);
+            item.setLayerResult(DetectionLayer.SYSCALL, suspiciousFdCount != 0);
 
             if (suspiciousFdCount > 0) {
                 item.setStatus(DetectionStatus.RISK);
@@ -381,9 +381,9 @@ public class ReadlinkDetector {
                 }
             }
 
-            item.setLayerResult(DetectionLayer.JAVA, true);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeFound == 0);
-            item.setLayerResult(DetectionLayer.SYSCALL, syscallFound == 0);
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, nativeFound > 0);
+            item.setLayerResult(DetectionLayer.SYSCALL, syscallFound > 0);
 
             if (syscallFound > 0) {
                 item.setStatus(DetectionStatus.RISK);
@@ -453,9 +453,9 @@ public class ReadlinkDetector {
                 }
             }
 
-            item.setLayerResult(DetectionLayer.JAVA, true);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeSuspicious == 0);
-            item.setLayerResult(DetectionLayer.SYSCALL, syscallSuspicious == 0);
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, nativeSuspicious > 0);
+            item.setLayerResult(DetectionLayer.SYSCALL, syscallSuspicious > 0);
 
             if (syscallSuspicious > 0) {
                 item.setStatus(DetectionStatus.RISK);
@@ -524,9 +524,9 @@ public class ReadlinkDetector {
             boolean consistent = nativeReal.equals(syscallReal);
             boolean hasSuspicious = containsSuspicious(nativeReal) || containsSuspicious(syscallReal);
 
-            item.setLayerResult(DetectionLayer.JAVA, !hasSuspicious);
-            item.setLayerResult(DetectionLayer.NATIVE, !nativeIsLink || !hasSuspicious);
-            item.setLayerResult(DetectionLayer.SYSCALL, !syscallIsLink || !hasSuspicious);
+            item.setLayerResult(DetectionLayer.JAVA, hasSuspicious);
+            item.setLayerResult(DetectionLayer.NATIVE, nativeIsLink && hasSuspicious);
+            item.setLayerResult(DetectionLayer.SYSCALL, syscallIsLink && hasSuspicious);
 
             if (hasSuspicious) {
                 item.setStatus(DetectionStatus.RISK);
@@ -565,9 +565,9 @@ public class ReadlinkDetector {
             boolean nativeCheck = nativeDetector.checkMountNamespaceNative();
             boolean syscallCheck = nativeDetector.checkMountNamespaceSyscall();
 
-            item.setLayerResult(DetectionLayer.JAVA, true);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeCheck);
-            item.setLayerResult(DetectionLayer.SYSCALL, syscallCheck);
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, !nativeCheck);
+            item.setLayerResult(DetectionLayer.SYSCALL, !syscallCheck);
 
             if (!syscallCheck) {
                 item.setStatus(DetectionStatus.RISK);

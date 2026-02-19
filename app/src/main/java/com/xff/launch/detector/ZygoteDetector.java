@@ -156,9 +156,9 @@ public class ZygoteDetector {
 
             boolean javaDetected = mapsDetected || propDetected;
 
-            item.setLayerResult(DetectionLayer.JAVA, !javaDetected);
-            item.setLayerResult(DetectionLayer.NATIVE, !nativeDetected);
-            item.setLayerResult(DetectionLayer.SYSCALL, !syscallDetected);
+            item.setLayerResult(DetectionLayer.JAVA, javaDetected);
+            item.setLayerResult(DetectionLayer.NATIVE, nativeDetected);
+            item.setLayerResult(DetectionLayer.SYSCALL, syscallDetected);
 
             if (syscallDetected || nativeDetected) {
                 item.setStatus(DetectionStatus.RISK);
@@ -237,9 +237,9 @@ public class ZygoteDetector {
             // Also check via native detector
             boolean nativeDetected = nativeDetector.checkZygiskSyscall();
 
-            item.setLayerResult(DetectionLayer.JAVA, !detected);
-            item.setLayerResult(DetectionLayer.NATIVE, !nativeDetected);
-            item.setLayerResult(DetectionLayer.SYSCALL, !nativeDetected);
+            item.setLayerResult(DetectionLayer.JAVA, detected);
+            item.setLayerResult(DetectionLayer.NATIVE, nativeDetected);
+            item.setLayerResult(DetectionLayer.SYSCALL, nativeDetected);
 
             if (detected) {
                 item.setStatus(DetectionStatus.RISK);
@@ -282,9 +282,9 @@ public class ZygoteDetector {
                 }
             }
 
-            item.setLayerResult(DetectionLayer.JAVA, !pathExists);
-            item.setLayerResult(DetectionLayer.NATIVE, !nativeDetected);
-            item.setLayerResult(DetectionLayer.SYSCALL, !syscallDetected);
+            item.setLayerResult(DetectionLayer.JAVA, pathExists);
+            item.setLayerResult(DetectionLayer.NATIVE, nativeDetected);
+            item.setLayerResult(DetectionLayer.SYSCALL, syscallDetected);
 
             if (syscallDetected || nativeDetected) {
                 item.setStatus(DetectionStatus.RISK);
@@ -341,9 +341,9 @@ public class ZygoteDetector {
             boolean nativeOk = nativeValue.isEmpty() || nativeValue.equals("0");
             boolean syscallOk = syscallValue.isEmpty() || syscallValue.equals("0");
 
-            item.setLayerResult(DetectionLayer.JAVA, javaOk && !isSuspicious);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeOk && !isSuspicious);
-            item.setLayerResult(DetectionLayer.SYSCALL, syscallOk && !isSuspicious);
+            item.setLayerResult(DetectionLayer.JAVA, !javaOk || isSuspicious);
+            item.setLayerResult(DetectionLayer.NATIVE, !nativeOk || isSuspicious);
+            item.setLayerResult(DetectionLayer.SYSCALL, !syscallOk || isSuspicious);
 
             if (isSuspicious) {
                 item.setStatus(DetectionStatus.RISK);
@@ -391,9 +391,9 @@ public class ZygoteDetector {
             boolean hasMagiskContext = currentContext.contains("magisk") ||
                     prevContext.contains("magisk");
 
-            item.setLayerResult(DetectionLayer.JAVA, !hasMagiskContext);
-            item.setLayerResult(DetectionLayer.NATIVE, !hasZygoteAnomaly);
-            item.setLayerResult(DetectionLayer.SYSCALL, !hasMagiskContext && !hasZygoteAnomaly);
+            item.setLayerResult(DetectionLayer.JAVA, hasMagiskContext);
+            item.setLayerResult(DetectionLayer.NATIVE, hasZygoteAnomaly);
+            item.setLayerResult(DetectionLayer.SYSCALL, hasMagiskContext || hasZygoteAnomaly);
 
             if (hasMagiskContext) {
                 item.setStatus(DetectionStatus.RISK);
@@ -443,9 +443,9 @@ public class ZygoteDetector {
             // Syscall check
             int syscallCount = nativeDetector.checkSuspiciousMapsSyscall();
 
-            item.setLayerResult(DetectionLayer.JAVA, suspiciousCount == 0);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeCount == 0);
-            item.setLayerResult(DetectionLayer.SYSCALL, syscallCount == 0);
+            item.setLayerResult(DetectionLayer.JAVA, suspiciousCount > 0);
+            item.setLayerResult(DetectionLayer.NATIVE, nativeCount > 0);
+            item.setLayerResult(DetectionLayer.SYSCALL, syscallCount > 0);
 
             if (syscallCount > 0 || suspiciousCount > 0) {
                 item.setStatus(DetectionStatus.RISK);
@@ -540,9 +540,9 @@ public class ZygoteDetector {
             // Syscall check
             boolean syscallOk = nativeDetector.checkAppProcessSyscall();
 
-            item.setLayerResult(DetectionLayer.JAVA, !hasAnomaly);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeOk);
-            item.setLayerResult(DetectionLayer.SYSCALL, syscallOk);
+            item.setLayerResult(DetectionLayer.JAVA, hasAnomaly);
+            item.setLayerResult(DetectionLayer.NATIVE, !nativeOk);
+            item.setLayerResult(DetectionLayer.SYSCALL, !syscallOk);
 
             if (!syscallOk || hasAnomaly) {
                 item.setStatus(DetectionStatus.RISK);
@@ -606,9 +606,9 @@ public class ZygoteDetector {
                 }
             }
 
-            item.setLayerResult(DetectionLayer.JAVA, foundCount == 0);
-            item.setLayerResult(DetectionLayer.NATIVE, foundCount == 0);
-            item.setLayerResult(DetectionLayer.SYSCALL, foundCount == 0);
+            item.setLayerResult(DetectionLayer.JAVA, foundCount > 0);
+            item.setLayerResult(DetectionLayer.NATIVE, foundCount > 0);
+            item.setLayerResult(DetectionLayer.SYSCALL, foundCount > 0);
 
             if (foundCount > 0) {
                 item.setStatus(DetectionStatus.RISK);
@@ -661,9 +661,9 @@ public class ZygoteDetector {
             // Check for inline hooks
             boolean hasInlineHooks = nativeDetector.checkInlineHooksSyscall();
 
-            item.setLayerResult(DetectionLayer.JAVA, true);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeIntact);
-            item.setLayerResult(DetectionLayer.SYSCALL, syscallIntact && !hasInlineHooks);
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, !nativeIntact);
+            item.setLayerResult(DetectionLayer.SYSCALL, !syscallIntact || hasInlineHooks);
 
             if (hasInlineHooks) {
                 item.setStatus(DetectionStatus.RISK);
@@ -700,9 +700,9 @@ public class ZygoteDetector {
             String smaps = nativeDetector.readFileSyscall("/proc/self/smaps");
             boolean hasPrivateDirty = checkPrivateDirtyPages(smaps);
 
-            item.setLayerResult(DetectionLayer.JAVA, !hasPrivateDirty);
-            item.setLayerResult(DetectionLayer.NATIVE, !hasSuspiciousAnon);
-            item.setLayerResult(DetectionLayer.SYSCALL, !hasSuspiciousAnon);
+            item.setLayerResult(DetectionLayer.JAVA, hasPrivateDirty);
+            item.setLayerResult(DetectionLayer.NATIVE, hasSuspiciousAnon);
+            item.setLayerResult(DetectionLayer.SYSCALL, hasSuspiciousAnon);
 
             if (hasSuspiciousAnon) {
                 item.setStatus(DetectionStatus.RISK);
@@ -737,9 +737,9 @@ public class ZygoteDetector {
             // Native layer check
             boolean nativeOk = nativeDetector.checkLibraryHooksNative();
 
-            item.setLayerResult(DetectionLayer.JAVA, true);
-            item.setLayerResult(DetectionLayer.NATIVE, nativeOk);
-            item.setLayerResult(DetectionLayer.SYSCALL, !libcHooked && !artHooked);
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, !nativeOk);
+            item.setLayerResult(DetectionLayer.SYSCALL, libcHooked || artHooked);
 
             if (libcHooked || artHooked) {
                 item.setStatus(DetectionStatus.RISK);
@@ -831,9 +831,9 @@ public class ZygoteDetector {
             if (zygoteInfo.equals("not_found")) {
                 item.setStatus(DetectionStatus.UNKNOWN);
                 item.setDetail("未找到Zygote进程");
-                item.setLayerResult(DetectionLayer.JAVA, true);
-                item.setLayerResult(DetectionLayer.NATIVE, true);
-                item.setLayerResult(DetectionLayer.SYSCALL, true);
+                item.setLayerResult(DetectionLayer.JAVA, false);
+                item.setLayerResult(DetectionLayer.NATIVE, false);
+                item.setLayerResult(DetectionLayer.SYSCALL, false);
                 return item;
             }
 
@@ -851,9 +851,9 @@ public class ZygoteDetector {
             // Check via native
             boolean hasAbnormalParent = nativeDetector.checkZygoteParentNative();
 
-            item.setLayerResult(DetectionLayer.JAVA, parentPid == 1);
-            item.setLayerResult(DetectionLayer.NATIVE, !hasAbnormalParent);
-            item.setLayerResult(DetectionLayer.SYSCALL, parentPid == 1);
+            item.setLayerResult(DetectionLayer.JAVA, parentPid != 1);
+            item.setLayerResult(DetectionLayer.NATIVE, hasAbnormalParent);
+            item.setLayerResult(DetectionLayer.SYSCALL, parentPid != 1);
 
             // Normal: parent should be init (PID 1)
             if (parentPid != 1 || hasAbnormalParent) {
@@ -892,9 +892,9 @@ public class ZygoteDetector {
             // Get details
             String details = nativeDetector.getAnonymousRwxDetails();
 
-            item.setLayerResult(DetectionLayer.JAVA, count == 0);
-            item.setLayerResult(DetectionLayer.NATIVE, count < 5);  // Some JIT is normal
-            item.setLayerResult(DetectionLayer.SYSCALL, count < 10);
+            item.setLayerResult(DetectionLayer.JAVA, count > 0);
+            item.setLayerResult(DetectionLayer.NATIVE, count >= 5);  // Some JIT is normal
+            item.setLayerResult(DetectionLayer.SYSCALL, count >= 10);
 
             if (count > 100) {
                 // Very high count -> likely hook/injection
@@ -956,9 +956,9 @@ public class ZygoteDetector {
                 depth++;
             }
 
-            item.setLayerResult(DetectionLayer.JAVA, inMemoryDexCount == 0);
-            item.setLayerResult(DetectionLayer.NATIVE, inMemoryDexCount == 0);
-            item.setLayerResult(DetectionLayer.SYSCALL, inMemoryDexCount == 0);
+            item.setLayerResult(DetectionLayer.JAVA, inMemoryDexCount > 0);
+            item.setLayerResult(DetectionLayer.NATIVE, inMemoryDexCount > 0);
+            item.setLayerResult(DetectionLayer.SYSCALL, inMemoryDexCount > 0);
 
             if (inMemoryDexCount > 0) {
                 item.setStatus(DetectionStatus.RISK);

@@ -13,6 +13,9 @@ import java.io.FileReader;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 /**
  * Root detection implementation with multi-layer support
  */
@@ -335,6 +338,83 @@ public class RootDetector {
     }
 
     /**
+     * Detect Magisk mount signatures in /proc/self/mounts
+     * Uses direct syscall to bypass libc hooks
+     */
+    public DetectionItem detectMountsForMagisk() {
+        DetectionItem item = new DetectionItem("Mounts Magisk 签名",
+            "通过 /proc/mounts 搜索 Magisk 挂载特征");
+
+        // Native layer
+        boolean nativeResult = nativeDetector.checkMountsForMagiskNative();
+        item.setLayerResult(DetectionLayer.NATIVE, nativeResult);
+
+        // Syscall layer
+        boolean syscallResult = nativeDetector.checkMountsForMagiskSyscall();
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallResult);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到 Magisk 挂载签名");
+            item.addDetectionDetail("💾 /proc/mounts", "Magisk 挂载特征",
+                "搜索词: /sbin/.magisk/, magisk, /sbin/.core/",
+                DetectionLayer.SYSCALL, "🔍");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到");
+        }
+
+        if (item.hasInconsistentResults()) {
+            item.setDetail(item.getDetail() + " (检测层不一致)");
+        }
+
+        return item;
+    }
+
+    /**
+     * Detect zygote SELinux context anomaly via /proc/self/attr/prev
+     * Uses direct syscall to bypass libc hooks
+     * Normal app processes should have "zygote" in their prev SELinux context
+     */
+    public DetectionItem detectZygoteContext() {
+        DetectionItem item = new DetectionItem("Zygote 上下文检测",
+            "通过 /proc/self/attr/prev 检测 Zygote SELinux 上下文");
+
+        // Native layer
+        boolean nativeResult = nativeDetector.checkZygoteContextNative();
+        item.setLayerResult(DetectionLayer.NATIVE, nativeResult);
+
+        // Syscall layer
+        boolean syscallResult = nativeDetector.checkZygoteContextSyscall();
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallResult);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.WARNING);
+            item.setDetail("Zygote 上下文异常");
+            item.addDetectionDetail("🔑 SELinux 上下文", "/proc/self/attr/prev",
+                "正常应包含 \"zygote\" (如 u:r:zygote:s0)\n" +
+                "上下文中未找到 zygote 标识",
+                DetectionLayer.SYSCALL, "⚠️");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("Zygote 上下文正常");
+
+            // 显示当前 SELinux context 作为参考
+            String context = nativeDetector.getSELinuxContextNative();
+            if (context != null && !context.isEmpty()) {
+                item.addDetectionDetail("🔑 SELinux 上下文", "attr/prev",
+                    "当前上下文: " + context, DetectionLayer.NATIVE, "✅");
+            }
+        }
+
+        if (item.hasInconsistentResults()) {
+            item.setDetail(item.getDetail() + " (检测层不一致)");
+        }
+
+        return item;
+    }
+
+    /**
      * Get all root detection items
      */
     public List<DetectionItem> getAllDetections() {
@@ -347,7 +427,58 @@ public class RootDetector {
         items.add(detectRootManagers());
         items.add(detectRootHiding());
         items.add(detectSuspiciousMounts());
+        items.add(detectMountsForMagisk());
+        items.add(detectZygoteContext());
+        items.add(detectSameUidProcesses());
         return items;
+    }
+
+    /**
+     * Detect suspicious same-UID processes
+     * Scans /proc for processes running under the same UID and checks if their
+     * /data/data/<name> directories exist, which could indicate shared-UID attacks
+     * or abnormal process injection.
+     */
+    public DetectionItem detectSameUidProcesses() {
+        DetectionItem item = new DetectionItem("同 UID 进程扫描", "检测同 UID 下的异常进程");
+
+        // Native layer - uses libc opendir/readdir/fopen/access
+        int nativeCount = 0;
+        try {
+            nativeCount = nativeDetector.scanSameUidProcessesNative();
+        } catch (Exception ignored) {
+        }
+        // Native detects other same-UID processes with data dirs
+        // Count > 1 means there are OTHER apps beyond self (self is excluded in native)
+        item.setLayerResult(DetectionLayer.NATIVE, nativeCount > 1);
+
+        // Syscall layer - uses direct syscalls to bypass libc hooks
+        int syscallCount = 0;
+        try {
+            syscallCount = nativeDetector.scanSameUidProcessesSyscall();
+        } catch (Exception ignored) {
+        }
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallCount > 1);
+
+        // Use the higher count for status determination
+        int maxCount = Math.max(nativeCount, syscallCount);
+
+        if (maxCount > 1) {
+            item.setStatus(DetectionStatus.WARNING);
+            item.setDetail("检测到 " + maxCount + " 个同 UID 进程");
+
+            // Collect detailed process information
+            collectSameUidProcessDetails(item);
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到异常同 UID 进程");
+        }
+
+        if (item.hasInconsistentResults()) {
+            item.setDetail(item.getDetail() + " (检测层不一致)");
+        }
+
+        return item;
     }
 
     // ===================== Java Layer Methods =====================
@@ -886,6 +1017,52 @@ public class RootDetector {
 
         } catch (Exception e) {
             android.util.Log.e("RootDetector", "Error reading mountinfo", e);
+        }
+    }
+
+    /**
+     * Collect detailed same-UID process information
+     */
+    private void collectSameUidProcessDetails(DetectionItem item) {
+        try {
+            String detailsJson = nativeDetector.getSameUidProcessDetails();
+            if (detailsJson == null || detailsJson.equals("[]")) return;
+
+            JSONArray processes = new JSONArray(detailsJson);
+            int totalProcesses = processes.length();
+            int withDataDir = 0;
+
+            for (int i = 0; i < processes.length() && i < 10; i++) {
+                JSONObject proc = processes.getJSONObject(i);
+                int pid = proc.getInt("pid");
+                String name = proc.getString("name");
+                boolean hasDataDir = proc.getBoolean("has_data_dir");
+                String dataPath = proc.getString("data_path");
+
+                if (hasDataDir) {
+                    withDataDir++;
+                }
+
+                String detail = "PID: " + pid +
+                    "\n进程名: " + name +
+                    "\n数据目录: " + dataPath +
+                    "\n目录存在: " + (hasDataDir ? "✓ 是" : "✗ 否");
+
+                String icon = hasDataDir ? "⚠️" : "ℹ️";
+                item.addDetectionDetail("🔍 同 UID 进程", name,
+                    detail, DetectionLayer.NATIVE, icon);
+            }
+
+            // Add summary
+            String summary = "同 UID 进程总数: " + totalProcesses +
+                "\n拥有数据目录: " + withDataDir + " 个" +
+                "\n当前 UID: " + android.os.Process.myUid() +
+                "\n当前 PID: " + android.os.Process.myPid();
+            item.addDetectionDetail("📊 扫描统计", "同 UID 进程概览",
+                summary, DetectionLayer.SYSCALL, "📈");
+
+        } catch (Exception e) {
+            android.util.Log.e("RootDetector", "Error parsing same UID process details", e);
         }
     }
 }

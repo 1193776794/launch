@@ -14,6 +14,7 @@ import java.util.List;
  * Detects:
  * - SELinux status (related to Root detection)
  * - Timing-based hook detection for Frida/Xposed
+ * - KernelSU kernel-level hook detection via timing side-channel
  */
 public class SideChannelDetector {
 
@@ -35,6 +36,9 @@ public class SideChannelDetector {
         items.add(checkSyscallTimingOpenat());
         items.add(checkSyscallTimingAccess());
         items.add(checkSyscallTimingStat());
+
+        // KernelSU kernel-level hook detection via timing side-channel
+        items.add(checkKernelSUSideChannel());
 
         return items;
     }
@@ -121,7 +125,7 @@ public class SideChannelDetector {
             // Set layer results
             item.setLayerResult(DetectionLayer.JAVA, false);  // Java layer N/A
             item.setLayerResult(DetectionLayer.NATIVE, isHooked);
-            item.setLayerResult(DetectionLayer.SYSCALL, !isHooked);
+            item.setLayerResult(DetectionLayer.SYSCALL, isHooked);
 
             if (isHooked) {
                 item.setStatus(DetectionStatus.RISK);
@@ -157,7 +161,7 @@ public class SideChannelDetector {
 
             item.setLayerResult(DetectionLayer.JAVA, false);
             item.setLayerResult(DetectionLayer.NATIVE, isHooked);
-            item.setLayerResult(DetectionLayer.SYSCALL, !isHooked);
+            item.setLayerResult(DetectionLayer.SYSCALL, isHooked);
 
             if (isHooked) {
                 item.setStatus(DetectionStatus.RISK);
@@ -193,7 +197,7 @@ public class SideChannelDetector {
 
             item.setLayerResult(DetectionLayer.JAVA, false);
             item.setLayerResult(DetectionLayer.NATIVE, isHooked);
-            item.setLayerResult(DetectionLayer.SYSCALL, !isHooked);
+            item.setLayerResult(DetectionLayer.SYSCALL, isHooked);
 
             if (isHooked) {
                 item.setStatus(DetectionStatus.RISK);
@@ -211,4 +215,92 @@ public class SideChannelDetector {
 
         return item;
     }
+
+    // ===================== KernelSU Side-Channel Detection =====================
+
+    /**
+     * KernelSU Timing Side-Channel Detection
+     *
+     * Detection principle:
+     *
+     * KernelSU hooks __NR_faccessat in the kernel to intercept file access checks.
+     * __NR_fchownat is NOT in KernelSU's hook list.
+     *
+     * Normal path (no KSU):
+     *   syscall -> kernel -> fast return (~50-100ns)
+     *   faccessat is naturally faster than fchownat
+     *
+     * With KernelSU:
+     *   faccessat: syscall -> kernel -> KSU hook layer -> return (~200-500ns)
+     *   fchownat:  syscall -> kernel -> fast return (~50-100ns)
+     *   faccessat becomes consistently SLOWER than fchownat
+     *
+     * Algorithm:
+     * 1. Bind to big core for stable measurements
+     * 2. Collect 10000 timing samples for each syscall
+     * 3. Sort both arrays (qsort) to reduce noise
+     * 4. Compare sorted arrays: count cases where faccessat > fchownat + 1
+     * 5. If anomaly count > 7000 (70%), KernelSU detected
+     *
+     * Why faccessat?
+     * - It's in KSU's hook list
+     * - Simple, fast, failure has no side effects
+     * - Other hooked calls are more complex or have side effects
+     */
+    private DetectionItem checkKernelSUSideChannel() {
+        DetectionItem item = new DetectionItem(
+                "KernelSU 侧信道检测",
+                "基于faccessat/fchownat时间差异的KernelSU内核Hook检测"
+        );
+
+        try {
+            // Perform full side-channel check
+            // Returns anomaly percentage (0-100), or -1 on error
+            int anomalyPercent = nativeDetector.ksuSideChannelCheck();
+
+            if (anomalyPercent < 0) {
+                // Error case
+                item.setLayerResult(DetectionLayer.JAVA, false);
+                item.setLayerResult(DetectionLayer.NATIVE, false);
+                item.setLayerResult(DetectionLayer.SYSCALL, false);
+                item.setStatus(DetectionStatus.UNKNOWN);
+                item.setDetail("侧信道检测执行失败（内存分配错误）");
+                return item;
+            }
+
+            // Threshold: 70% (0x1B58 = 7000/10000)
+            boolean ksuDetected = anomalyPercent > 70;
+
+            // Set layer results
+            // This detection operates at the syscall/kernel level
+            item.setLayerResult(DetectionLayer.JAVA, false);     // Java layer N/A
+            item.setLayerResult(DetectionLayer.NATIVE, false);   // Native layer N/A
+            item.setLayerResult(DetectionLayer.SYSCALL, ksuDetected);
+
+            if (ksuDetected) {
+                item.setStatus(DetectionStatus.RISK);
+                item.setDetail(String.format(
+                        "检测到KernelSU内核级Hook - 异常率: %d%% (阈值: 70%%)\n" +
+                        "faccessat执行耗时异常偏高，表明存在内核级syscall拦截",
+                        anomalyPercent
+                ));
+            } else {
+                item.setStatus(DetectionStatus.SAFE);
+                item.setDetail(String.format(
+                        "内核syscall时序正常 - 异常率: %d%% (阈值: 70%%)",
+                        anomalyPercent
+                ));
+            }
+
+        } catch (Exception e) {
+            item.setLayerResult(DetectionLayer.JAVA, false);
+            item.setLayerResult(DetectionLayer.NATIVE, false);
+            item.setLayerResult(DetectionLayer.SYSCALL, false);
+            item.setStatus(DetectionStatus.UNKNOWN);
+            item.setDetail("侧信道检测异常: " + e.getMessage());
+        }
+
+        return item;
+    }
 }
+

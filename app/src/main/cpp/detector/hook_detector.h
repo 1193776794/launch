@@ -39,8 +39,17 @@ public:
     static bool checkRiruZygiskSyscall();
     static bool checkMapsForHooksSyscall();
 
-    // Thread name detection for Frida
+    // Thread name detection for Frida (including linjector via syscall)
     static bool checkFridaThreads();
+
+    // /proc/net/tcp port scanning (IDA & Frida)
+    static bool checkIdaPortTcpNative();      // IDA port 23946 (0x5D8A)
+    static bool checkIdaPortTcpSyscall();
+    static bool checkFridaPortTcpNative();    // Frida port 27042 (0x69A2)
+    static bool checkFridaPortTcpSyscall();
+
+    // FD linjector scanning (Frida injector pipe detection)
+    static bool checkFridaFdLinjectorSyscall();
 
     // Get detailed info about LSPosed injection
     static std::string getLSPosedDetails();
@@ -66,6 +75,12 @@ public:
     static MultiLayerResult detectZygisk();  // 改为通用 Zygisk 检测
     static MultiLayerResult detectSmapsHook();  // SMAPS 内存取证检测
     static MultiLayerResult detectMemoryHooks();
+    static MultiLayerResult detectDumpArtMethodHook();  // DumpArtMethod Hook 检测
+
+    // DumpArtMethod Hook Detection
+    // Scans /proc/self/maps for dumpArtMethod symbol - indicates ART method dumping tools
+    static bool checkDumpArtMethodHookNative();
+    static bool checkDumpArtMethodHookSyscall();
 };
 
 #endif // LAUNCH_HOOK_DETECTOR_H

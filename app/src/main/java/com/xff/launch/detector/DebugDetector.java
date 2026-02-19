@@ -131,10 +131,10 @@ public class DebugDetector {
         // Native layer - read TracerPid via native
         int nativeTracerPid = nativeDetector.getTracerPid();
 
-        // Set layer results (INVERTED: true = safe, false = detected)
-        item.setLayerResult(DetectionLayer.JAVA, javaTracerPid == 0);
-        item.setLayerResult(DetectionLayer.NATIVE, nativeTracerPid == 0);
-        item.setLayerResult(DetectionLayer.SYSCALL, syscallTracerPid == 0);
+        // Set layer results: true = detected (TracerPid > 0), false = safe
+        item.setLayerResult(DetectionLayer.JAVA, javaTracerPid != 0);
+        item.setLayerResult(DetectionLayer.NATIVE, nativeTracerPid != 0);
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallTracerPid != 0);
 
         // Check all threads
         String allThreadsStatus = checkAllThreadsTracerPid();
@@ -232,13 +232,51 @@ public class DebugDetector {
             detail = "TracerPid:0 (正常 - 无反调试保护)";
         }
 
-        // Set layer results (true = safe/normal, false = risk)
-        item.setLayerResult(DetectionLayer.JAVA, tracerPid == 0 || isProtected);
-        item.setLayerResult(DetectionLayer.NATIVE, tracerPid == 0 || isProtected);
-        item.setLayerResult(DetectionLayer.SYSCALL, tracerPid == 0 || isProtected);
+        // Set layer results: true = detected risk (external debugger), false = safe/normal
+        item.setLayerResult(DetectionLayer.JAVA, tracerPid != 0 && !isProtected);
+        item.setLayerResult(DetectionLayer.NATIVE, tracerPid != 0 && !isProtected);
+        item.setLayerResult(DetectionLayer.SYSCALL, tracerPid != 0 && !isProtected);
 
         item.setStatus(status);
         item.setDetail(detail);
+
+        return item;
+    }
+
+    /**
+     * Detect suspicious tool paths
+     * Checks for debuggers (IDA/GDB), injection tools, Frida gadgets,
+     * unpackers (FART/BlackDex/DEX Dump), etc.
+     */
+    public DetectionItem detectSuspiciousToolPaths() {
+        DetectionItem item = new DetectionItem("可疑工具路径", "检测调试器/脱壳工具/注入工具等文件路径");
+
+        // Java layer - check via File.exists()
+        boolean javaResult = checkSuspiciousToolPathsJava();
+        item.setLayerResult(DetectionLayer.JAVA, javaResult);
+
+        // Native layer - check via libc access()
+        boolean nativeResult = nativeDetector.checkSuspiciousToolPathsNative();
+        item.setLayerResult(DetectionLayer.NATIVE, nativeResult);
+
+        // Syscall layer - check via direct syscall
+        boolean syscallResult = nativeDetector.checkSuspiciousToolPathsSyscall();
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallResult);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到可疑工具");
+
+            // Collect detailed detection info
+            collectSuspiciousToolPathDetails(item);
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到");
+        }
+
+        if (item.hasInconsistentResults()) {
+            item.setDetail(item.getDetail() + " (检测层不一致)");
+        }
 
         return item;
     }
@@ -253,6 +291,7 @@ public class DebugDetector {
         items.add(detectJdwp());
         items.add(detectPtrace());
         items.add(detectPtraceSelfProtection());
+        items.add(detectSuspiciousToolPaths());
         return items;
     }
 
@@ -379,6 +418,38 @@ public class DebugDetector {
             // Ignore
         }
         return result.toString();
+    }
+
+    /**
+     * Java layer check for suspicious tool paths using File.exists()
+     * Checks suspicious tool paths via Java File API
+     */
+    private boolean checkSuspiciousToolPathsJava() {
+        String[] toolPaths = {
+            "/data/local/tmp/android_server",
+            "/data/local/tmp/android_server64",
+            "/data/local/tmp/gdbserver",
+            "/data/local/tmp/inject",
+            "/data/local/tmp/libhello.so",
+            "/sdcard/xxxx/",
+            "/sdcard/ooxx/",
+            "/sdcard/fart/",
+            "/sdcard/Download/dexDump/",
+            "/sdcard/Download/top.niunaijun.blackdexa32_logcat.txt",
+            "/sdcard/Download/top.niunaijun.blackdexa64_logcat.txt",
+            "/data/data/top.niunaijun.blackdexa32",
+            "/data/data/top.niunaijun.blackdexa64"
+        };
+
+        for (String path : toolPaths) {
+            try {
+                if (new java.io.File(path).exists()) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
     }
 
     // ===================== Detail Collection Methods =====================
@@ -547,6 +618,18 @@ public class DebugDetector {
                         line.trim(),
                         DetectionLayer.SYSCALL, "🔍");
                 }
+                // IDA Pro android_server 默认端口 23946 = 0x5D8A
+                if (line.contains(":5D8A")) {
+                    item.addDetectionDetail("🌐 IDA 端口", "/proc/net/tcp",
+                        "检测到 IDA Pro 端口 23946 (0x5D8A): " + line.trim(),
+                        DetectionLayer.JAVA, "🔌");
+                }
+                // Frida 默认端口 27042 = 0x69A2, 27043 = 0x69A3
+                if (line.contains(":69A2") || line.contains(":69A3")) {
+                    item.addDetectionDetail("🌐 Frida 端口", "/proc/net/tcp",
+                        "检测到 Frida 端口: " + line.trim(),
+                        DetectionLayer.JAVA, "🔌");
+                }
             }
             reader.close();
         } catch (Exception ignored) {
@@ -638,5 +721,96 @@ public class DebugDetector {
         item.addDetectionDetail("📊 进程信息", "当前进程",
             "PID: " + myPid,
             DetectionLayer.JAVA, "🆔");
+    }
+
+    /**
+     * Collect suspicious tool path detection details
+     */
+    private void collectSuspiciousToolPathDetails(DetectionItem item) {
+        // Get detected path details from native layer (JSON format)
+        String detectedJson = null;
+        try {
+            detectedJson = nativeDetector.getDetectedSuspiciousToolPaths();
+        } catch (Exception ignored) {
+        }
+
+        // Define all paths with descriptions and categories (consistent with native layer)
+        String[][] toolPaths = {
+            // {path, description, icon, category}
+            {"/data/local/tmp/android_server",     "IDA 调试器 (32位)",    "🔴", "调试器"},
+            {"/data/local/tmp/android_server64",    "IDA 调试器 (64位)",    "🔴", "调试器"},
+            {"/data/local/tmp/gdbserver",           "GDB 调试器",          "🔴", "调试器"},
+            {"/data/local/tmp/inject",              "注入工具",            "🟠", "注入/Frida"},
+            {"/data/local/tmp/libhello.so",         "Frida gadget",        "🟠", "注入/Frida"},
+            {"/sdcard/xxxx/",                       "脱壳工具",   "🟡", "脱壳工具"},
+            {"/sdcard/ooxx/",                       "脱壳工具",            "🟡", "脱壳工具"},
+            {"/sdcard/fart/",                       "FART 脱壳工具",       "🟡", "脱壳工具"},
+            {"/sdcard/Download/dexDump/",           "DEX Dump 工具",       "🟡", "脱壳工具"},
+            {"/sdcard/Download/top.niunaijun.blackdexa32_logcat.txt", "BlackDex 日志 (32位)", "🟡", "脱壳工具"},
+            {"/sdcard/Download/top.niunaijun.blackdexa64_logcat.txt", "BlackDex 日志 (64位)", "🟡", "脱壳工具"},
+            {"/data/data/top.niunaijun.blackdexa32",  "BlackDex 应用 (32位)", "🟡", "脱壳工具"},
+            {"/data/data/top.niunaijun.blackdexa64",  "BlackDex 应用 (64位)", "🟡", "脱壳工具"},
+        };
+
+        int detectedCount = 0;
+        StringBuilder detectedNames = new StringBuilder();
+
+        for (String[] entry : toolPaths) {
+            String path = entry[0];
+            String desc = entry[1];
+            String icon = entry[2];
+            String category = entry[3];
+
+            // Check via Java layer
+            boolean javaExists = false;
+            try {
+                javaExists = new java.io.File(path).exists();
+            } catch (Exception ignored) {
+            }
+
+            // Check via native layer (fileExistsNative)
+            boolean nativeExists = false;
+            try {
+                nativeExists = nativeDetector.fileExistsNative(path);
+            } catch (Exception ignored) {
+            }
+
+            // Check via syscall layer
+            boolean syscallExists = false;
+            try {
+                syscallExists = nativeDetector.fileExistsSyscall(path);
+            } catch (Exception ignored) {
+            }
+
+            if (javaExists || nativeExists || syscallExists) {
+                detectedCount++;
+
+                StringBuilder detail = new StringBuilder();
+                detail.append("路径: ").append(path);
+                detail.append("\n检测层: ");
+                if (javaExists) detail.append("Java ✓ ");
+                if (nativeExists) detail.append("Native ✓ ");
+                if (syscallExists) detail.append("Syscall ✓ ");
+
+                // Determine which detection layer to report
+                DetectionLayer reportLayer = syscallExists ? DetectionLayer.SYSCALL :
+                                            nativeExists ? DetectionLayer.NATIVE :
+                                            DetectionLayer.JAVA;
+
+                item.addDetectionDetail(icon + " " + category, desc,
+                    detail.toString(), reportLayer, icon);
+
+                if (detectedNames.length() > 0) detectedNames.append(", ");
+                detectedNames.append(desc);
+            }
+        }
+
+        // Add detection summary
+        if (detectedCount > 0) {
+            item.addDetectionDetail("📊 检测统计", "发现可疑路径",
+                "数量: " + detectedCount + "/" + toolPaths.length + "\n" +
+                "发现: " + detectedNames.toString(),
+                DetectionLayer.SYSCALL, "📈");
+        }
     }
 }

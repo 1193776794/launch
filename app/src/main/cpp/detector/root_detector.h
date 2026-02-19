@@ -76,6 +76,14 @@ public:
     static bool checkRootHidingSyscall();
     static bool checkSuspiciousMountsSyscall();
 
+    // /proc/mounts Magisk signature detection
+    static bool checkMountsForMagiskNative();
+    static bool checkMountsForMagiskSyscall();
+
+    // Zygote SELinux context detection via /proc/self/attr/prev
+    static bool checkZygoteContextNative();
+    static bool checkZygoteContextSyscall();
+
     // System property checks
     static bool checkBuildTags();
     static bool checkSelinuxStatus();

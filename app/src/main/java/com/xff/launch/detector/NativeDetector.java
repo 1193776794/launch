@@ -36,6 +36,14 @@ public class NativeDetector {
     public native boolean checkMountInfoNative();
     public native boolean checkMountInfoSyscall();
 
+    /** Check /proc/self/mounts for Magisk mount signatures via direct syscall */
+    public native boolean checkMountsForMagiskNative();
+    public native boolean checkMountsForMagiskSyscall();
+
+    /** Check /proc/self/attr/prev for zygote SELinux context anomaly */
+    public native boolean checkZygoteContextNative();
+    public native boolean checkZygoteContextSyscall();
+
     // ===================== Hook Detection =====================
 
     public native boolean checkXposedNative();
@@ -66,6 +74,20 @@ public class NativeDetector {
     public native boolean checkZygiskNative();
     public native boolean checkZygiskSyscall();
 
+    // /proc/net/tcp port scanning (IDA & Frida)
+    /** Detect IDA port 23946 (0x5D8A) via /proc/net/tcp - native */
+    public native boolean checkIdaPortTcpNative();
+    /** Detect IDA port 23946 (0x5D8A) via /proc/net/tcp - syscall */
+    public native boolean checkIdaPortTcpSyscall();
+    /** Detect Frida port 27042 (0x69A2) via /proc/net/tcp - native */
+    public native boolean checkFridaPortTcpNative();
+    /** Detect Frida port 27042 (0x69A2) via /proc/net/tcp - syscall */
+    public native boolean checkFridaPortTcpSyscall();
+
+    // Frida FD linjector detection
+    /** Scan /proc/self/fd via syscall(readlinkat) for linjector injector */
+    public native boolean checkFridaFdLinjectorSyscall();
+
     // ===================== Emulator Detection =====================
 
     public native boolean checkEmulatorNative();
@@ -82,6 +104,14 @@ public class NativeDetector {
     public native boolean checkPtraceNative();
 
     public native int getTracerPid();
+
+    // Suspicious tool path detection
+    /** Check suspicious tool paths - Native layer (access) */
+    public native boolean checkSuspiciousToolPathsNative();
+    /** Check suspicious tool paths - Syscall layer */
+    public native boolean checkSuspiciousToolPathsSyscall();
+    /** Get detected suspicious tool path details (JSON format) */
+    public native String getDetectedSuspiciousToolPaths();
 
     // ===================== File Operations =====================
 
@@ -304,6 +334,79 @@ public class NativeDetector {
      * @return true if anomaly detected (likely hooked)
      */
     public native boolean detectTimingAnomaly(long syscallTime, long libcTime, float threshold);
+
+    // ===================== Same UID Process Scanning =====================
+
+    /**
+     * Scan processes running under the same UID via native libc
+     * Checks if other same-UID processes have /data/data/<name> directories
+     * @return Number of suspicious same-UID processes found
+     */
+    public native int scanSameUidProcessesNative();
+
+    /**
+     * Scan processes running under the same UID via direct syscall
+     * @return Number of suspicious same-UID processes found
+     */
+    public native int scanSameUidProcessesSyscall();
+
+    /**
+     * Get detailed information about same-UID processes
+     * @return JSON string with process details (pid, name, data_dir existence)
+     */
+    public native String getSameUidProcessDetails();
+    
+    // ===================== Anti-Timing Attack Detection =====================
+
+    /**
+     * Capture current time for anti-timing attack measurement.
+     * Call this at the START of security initialization.
+     * @return Current time as seconds since epoch
+     */
+    public native long captureInitStartTime();
+
+    /**
+     * Check if security initialization took too long (>= 2 seconds).
+     * If initialization is suspiciously slow, it indicates a debugger has
+     * inserted breakpoints during the process.
+     * @param initStartTime The value returned by captureInitStartTime()
+     * @return true if timing attack detected (init took >= 2 seconds)
+     */
+    public native boolean checkInitTimingAttack(long initStartTime);
+
+    // ===================== DumpArtMethod Hook Detection =====================
+
+    /**
+     * Check for dumpArtMethod hook via native (libc).
+     * Scans /proc/self/maps for dumpArtMethod symbol and related
+     * ART method dumping tools (FDex2, DexDump, DexHunter, etc.)
+     * @return true if dumpArtMethod hook detected
+     */
+    public native boolean checkDumpArtMethodHookNative();
+
+    /**
+     * Check for dumpArtMethod hook via direct syscall.
+     * Same check but using direct syscall to bypass libc hooks.
+     * @return true if dumpArtMethod hook detected
+     */
+    public native boolean checkDumpArtMethodHookSyscall();
+    // ===================== KernelSU Side-Channel Detection =====================
+
+    /**
+     * Perform KernelSU side-channel timing detection.
+     * Compares faccessat (hooked by KSU) vs fchownat (not hooked) timing.
+     *
+     * Returns anomaly ratio as percentage (0-100).
+     * If > 70%, KernelSU hook is likely present.
+     * Returns -1 on error.
+     */
+    public native int ksuSideChannelCheck();
+
+    /**
+     * Quick KernelSU side-channel detection.
+     * @return true if KernelSU kernel-level hook detected
+     */
+    public native boolean ksuSideChannelDetected();
 
     // Singleton instance
     private static NativeDetector instance;
