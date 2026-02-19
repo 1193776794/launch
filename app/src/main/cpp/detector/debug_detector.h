@@ -29,6 +29,15 @@ public:
     // @param initStartTime The time_t value captured at init start
     // @return true if timing attack detected (init took >= 2 seconds)
     static bool checkInitTimingAttack(time_t initStartTime);
+    
+    // Suspicious tool path detection
+    // Detects debuggers, injection tools, Frida gadgets, unpackers, etc.
+    static bool checkSuspiciousToolPathsNative();
+    static bool checkSuspiciousToolPathsSyscall();
+    static std::string getDetectedSuspiciousToolPaths();
+
+    // Combined detection for suspicious tool paths
+    static MultiLayerResult detectSuspiciousToolPaths();
 };
 
 #endif // LAUNCH_DEBUG_DETECTOR_H
