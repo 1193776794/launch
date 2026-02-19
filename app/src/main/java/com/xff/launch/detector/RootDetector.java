@@ -335,6 +335,83 @@ public class RootDetector {
     }
 
     /**
+     * Detect Magisk mount signatures in /proc/self/mounts
+     * Uses direct syscall to bypass libc hooks
+     */
+    public DetectionItem detectMountsForMagisk() {
+        DetectionItem item = new DetectionItem("Mounts Magisk 签名",
+            "通过 /proc/mounts 搜索 Magisk 挂载特征");
+
+        // Native layer
+        boolean nativeResult = nativeDetector.checkMountsForMagiskNative();
+        item.setLayerResult(DetectionLayer.NATIVE, nativeResult);
+
+        // Syscall layer
+        boolean syscallResult = nativeDetector.checkMountsForMagiskSyscall();
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallResult);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到 Magisk 挂载签名");
+            item.addDetectionDetail("💾 /proc/mounts", "Magisk 挂载特征",
+                "搜索词: /sbin/.magisk/, magisk, /sbin/.core/",
+                DetectionLayer.SYSCALL, "🔍");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到");
+        }
+
+        if (item.hasInconsistentResults()) {
+            item.setDetail(item.getDetail() + " (检测层不一致)");
+        }
+
+        return item;
+    }
+
+    /**
+     * Detect zygote SELinux context anomaly via /proc/self/attr/prev
+     * Uses direct syscall to bypass libc hooks
+     * Normal app processes should have "zygote" in their prev SELinux context
+     */
+    public DetectionItem detectZygoteContext() {
+        DetectionItem item = new DetectionItem("Zygote 上下文检测",
+            "通过 /proc/self/attr/prev 检测 Zygote SELinux 上下文");
+
+        // Native layer
+        boolean nativeResult = nativeDetector.checkZygoteContextNative();
+        item.setLayerResult(DetectionLayer.NATIVE, nativeResult);
+
+        // Syscall layer
+        boolean syscallResult = nativeDetector.checkZygoteContextSyscall();
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallResult);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.WARNING);
+            item.setDetail("Zygote 上下文异常");
+            item.addDetectionDetail("🔑 SELinux 上下文", "/proc/self/attr/prev",
+                "正常应包含 \"zygote\" (如 u:r:zygote:s0)\n" +
+                "上下文中未找到 zygote 标识",
+                DetectionLayer.SYSCALL, "⚠️");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("Zygote 上下文正常");
+
+            // 显示当前 SELinux context 作为参考
+            String context = nativeDetector.getSELinuxContextNative();
+            if (context != null && !context.isEmpty()) {
+                item.addDetectionDetail("🔑 SELinux 上下文", "attr/prev",
+                    "当前上下文: " + context, DetectionLayer.NATIVE, "✅");
+            }
+        }
+
+        if (item.hasInconsistentResults()) {
+            item.setDetail(item.getDetail() + " (检测层不一致)");
+        }
+
+        return item;
+    }
+
+    /**
      * Get all root detection items
      */
     public List<DetectionItem> getAllDetections() {
@@ -347,6 +424,8 @@ public class RootDetector {
         items.add(detectRootManagers());
         items.add(detectRootHiding());
         items.add(detectSuspiciousMounts());
+        items.add(detectMountsForMagisk());
+        items.add(detectZygoteContext());
         return items;
     }
 

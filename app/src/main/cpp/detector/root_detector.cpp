@@ -30,6 +30,11 @@ const std::vector<std::string>& RootDetector::getSuPaths() {
 const std::vector<std::string>& RootDetector::getMagiskPaths() {
     static std::vector<std::string> paths = {
         "/sbin/.magisk",
+        "/sbin/.magisk/mirror",
+        "/sbin/.magisk/block",
+        "/sbin/.core",            // Legacy Magisk (v15-v18) core directory
+        "/sbin/.core/mirror",     // Legacy Magisk mirror mount
+        "/sbin/.core/img",        // Legacy Magisk module image
         "/data/adb/magisk",
         "/data/adb/magisk.img",
         "/data/adb/magisk.db",
@@ -190,6 +195,8 @@ bool RootDetector::checkSuspiciousMountsNative() {
     // Note: overlay and tmpfs are normal system mounts, don't check them
     const std::vector<std::string> suspiciousPatterns = {
         "magisk",
+        "/sbin/.magisk/",        // Magisk working directory
+        "/sbin/.core/",          // Legacy Magisk (v15-v18) core directory
         "zygisk",
         "zygisksu",
         "kernelsu",
@@ -321,6 +328,8 @@ bool RootDetector::checkSuspiciousMountsSyscall() {
     // Note: overlay and tmpfs are normal system mounts, don't check them
     const std::vector<std::string> suspiciousPatterns = {
         "magisk",
+        "/sbin/.magisk/",        // Magisk working directory
+        "/sbin/.core/",          // Legacy Magisk (v15-v18) core directory
         "zygisk",
         "zygisksu",
         "zygisk_su",
@@ -386,6 +395,81 @@ bool RootDetector::checkRootHidingSyscall() {
 bool RootDetector::checkBuildTags() {
     std::string content = syscall_read_file("/system/build.prop", 16384);
     return content.find("ro.build.tags=test-keys") != std::string::npos;
+}
+
+// ===================== /proc/mounts Magisk Detection =====================
+// Read /proc/<pid>/mounts via direct syscall, search for Magisk signatures
+
+bool RootDetector::checkMountsForMagiskNative() {
+    std::ifstream file("/proc/self/mounts");
+    if (!file.is_open()) return false;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.find("/sbin/.magisk/") != std::string::npos ||
+            line.find("magisk") != std::string::npos ||
+            line.find("/sbin/.core/") != std::string::npos) {
+            LOGD("Magisk mount signature found (native): %s", line.c_str());
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RootDetector::checkMountsForMagiskSyscall() {
+    std::string content = syscall_read_file("/proc/self/mounts", 32768);
+    if (content.empty()) return false;
+
+    if (content.find("/sbin/.magisk/") != std::string::npos ||
+        content.find("magisk") != std::string::npos ||
+        content.find("/sbin/.core/") != std::string::npos) {
+        LOGD("Magisk mount signature found (syscall)");
+        return true;
+    }
+    return false;
+}
+
+// ===================== Zygote Context Detection =====================
+// Read /proc/<pid>/attr/prev, search for "zygote" in SELinux context
+// Normal Android app processes are forked from zygote, so attr/prev
+// should contain the zygote's SELinux context (e.g. "u:r:zygote:s0")
+
+bool RootDetector::checkZygoteContextNative() {
+    std::ifstream file("/proc/self/attr/prev");
+    if (!file.is_open()) return false;
+
+    std::string content;
+    std::getline(file, content);
+
+    // Normal: should contain "zygote" (e.g. "u:r:zygote:s0")
+    if (content.find("zygote") != std::string::npos) {
+        return false; // Normal - process was forked from zygote
+    }
+
+    // Abnormal: attr/prev does not contain zygote context
+    // This may indicate the process was spawned abnormally
+    LOGD("Abnormal zygote context (native): %s", content.c_str());
+    return true;
+}
+
+bool RootDetector::checkZygoteContextSyscall() {
+    std::string content = syscall_read_file("/proc/self/attr/prev", 256);
+
+    // If we can't read attr/prev, try attr/current as fallback reference
+    if (content.empty()) {
+        content = syscall_read_file("/proc/self/attr/current", 256);
+    }
+
+    if (content.empty()) return false;
+
+    // Normal: should contain "zygote" (e.g. "u:r:zygote:s0")
+    if (content.find("zygote") != std::string::npos) {
+        return false; // Normal - process was forked from zygote
+    }
+
+    // Abnormal: context does not contain zygote
+    LOGD("Abnormal zygote context (syscall): %s", content.c_str());
+    return true;
 }
 
 bool RootDetector::checkSelinuxStatus() {
