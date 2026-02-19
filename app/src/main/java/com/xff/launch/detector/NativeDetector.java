@@ -390,6 +390,23 @@ public class NativeDetector {
      * @return true if dumpArtMethod hook detected
      */
     public native boolean checkDumpArtMethodHookSyscall();
+    // ===================== KernelSU Side-Channel Detection =====================
+
+    /**
+     * Perform KernelSU side-channel timing detection.
+     * Compares faccessat (hooked by KSU) vs fchownat (not hooked) timing.
+     *
+     * Returns anomaly ratio as percentage (0-100).
+     * If > 70%, KernelSU hook is likely present.
+     * Returns -1 on error.
+     */
+    public native int ksuSideChannelCheck();
+
+    /**
+     * Quick KernelSU side-channel detection.
+     * @return true if KernelSU kernel-level hook detected
+     */
+    public native boolean ksuSideChannelDetected();
 
     // Singleton instance
     private static NativeDetector instance;

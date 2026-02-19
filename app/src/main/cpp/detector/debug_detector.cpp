@@ -119,7 +119,8 @@ bool DebugDetector::checkInitTimingAttack(time_t initStartTime) {
 
     LOGD("Anti-timing: init completed in %ld seconds (normal)", (long)elapsed);
     return false;  // Normal execution time
-    
+}
+
 // ===================== Suspicious Tool Path Detection =====================
 // Iterates over suspicious tool path array, using access() to check file existence
 
