@@ -14,29 +14,55 @@ const std::vector<std::string>& EmulatorDetector::getEmulatorFiles() {
         "/dev/qemu_pipe",
         "/dev/qemu_trace",
         "/dev/goldfish_pipe",
-        "/system/lib/libc_malloc_debug_qemu.so",
+        "/sys/devices/virtual/misc/qemu_pipe",
+        "/sys/class/misc/qemu_pipe",
         "/sys/qemu_trace",
+        "/system/lib/libc_malloc_debug_qemu.so",
+        "/system/lib/libc_malloc_debug_qemu.so-arm",
         "/system/bin/qemu-props",
+        "/system/framework/libqemu_wl.txt",
+        "/data/downloads/qemu_list.txt",
         "/init.goldfish.rc",
         "/init.ranchu.rc",
+        // Android Emulator
+        "/system/lib/egl/libEGL_emulation.so",
         // Genymotion
         "/dev/socket/genyd",
         "/dev/socket/baseband_genyd",
-        // Nox
+        // VirtualBox
+        "/sys/module/vboxsf",
+        "/ueventd.vbox86.rc",
+        "/fstab.vbox86",
+        // Nox (夜神模拟器)
         "/data/data/com.bignox.app.store.hd",
         "/system/bin/nox",
         "/system/bin/nox-prop",
+        "/system/bin/nox-vbox-sf",
+        "/system/lib/libnox.so",
+        "/system/lib/libnb.so",
         "/fstab.nox",
-        // LDPlayer
+        // LDPlayer (雷电模拟器)
         "/system/bin/ldinit",
         "/system/bin/ldmountsf",
         "/fstab.andy",
-        // MEmu
+        // MEmu (逍遥模拟器)
         "/data/data/com.microvirt.guide",
         "/system/bin/microvirt",
-        "/fstab.vbox86",
+        // Droid4X (海马玩模拟器)
+        "/system/droid4x",
+        "/system/bin/droid4x-vbox-sf",
+        // TiantianVM (天天模拟器)
+        "/system/lib/egl/libEGL_tiantianVM.so",
+        "/system/bin/ttVM-vbox-sf",
         // BlueStacks
-        "/data/data/com.bluestacks.settings"
+        "/data/data/com.bluestacks.settings",
+        "/dev/com.bluestacks.superuser.daemon",
+        "/boot/bstmods/vboxsf.ko",
+        // AndroVM
+        "/system/bin/androVM-vbox-sf",
+        // Yiwan (逸玩模拟器)
+        "/system/bin/yiwan-prop",
+        "/system/bin/yiwan-sf"
     };
     return files;
 }

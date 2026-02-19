@@ -424,14 +424,43 @@ public class EmulatorDetector {
      */
     private void collectEmulatorFilesDetails(DetectionItem item) {
         String[] emulatorFiles = {
+            // QEMU
             "/dev/qemu_pipe",
             "/dev/qemu_trace",
             "/dev/goldfish_pipe",
-            "/system/lib/libc_malloc_debug_qemu.so",
+            "/sys/devices/virtual/misc/qemu_pipe",
+            "/sys/class/misc/qemu_pipe",
             "/sys/qemu_trace",
+            "/system/lib/libc_malloc_debug_qemu.so",
+            "/system/lib/libc_malloc_debug_qemu.so-arm",
             "/system/bin/qemu-props",
+            "/system/framework/libqemu_wl.txt",
+            "/data/downloads/qemu_list.txt",
             "/system/etc/init.goldfish.rc",
-            "/system/etc/init.ranchu.rc"
+            "/system/etc/init.ranchu.rc",
+            // Android Emulator
+            "/system/lib/egl/libEGL_emulation.so",
+            // VirtualBox
+            "/sys/module/vboxsf",
+            "/ueventd.vbox86.rc",
+            // Nox (夜神模拟器)
+            "/system/bin/nox-vbox-sf",
+            "/system/lib/libnox.so",
+            "/system/lib/libnb.so",
+            // Droid4X (海马玩模拟器)
+            "/system/droid4x",
+            "/system/bin/droid4x-vbox-sf",
+            // TiantianVM (天天模拟器)
+            "/system/lib/egl/libEGL_tiantianVM.so",
+            "/system/bin/ttVM-vbox-sf",
+            // BlueStacks
+            "/dev/com.bluestacks.superuser.daemon",
+            "/boot/bstmods/vboxsf.ko",
+            // AndroVM
+            "/system/bin/androVM-vbox-sf",
+            // Yiwan (逸玩模拟器)
+            "/system/bin/yiwan-prop",
+            "/system/bin/yiwan-sf"
         };
 
         for (String path : emulatorFiles) {
