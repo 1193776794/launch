@@ -305,6 +305,75 @@ public class NativeDetector {
      */
     public native boolean detectTimingAnomaly(long syscallTime, long libcTime, float threshold);
 
+    // ===================== Extended Fingerprint Collection =====================
+
+    /** Get MAC address via native libc (wlan0/eth0) */
+    public native String getMacAddressNative();
+    /** Get MAC address via syscall (wlan0/eth0) */
+    public native String getMacAddressSyscall();
+
+    /** Get total RAM in MB via native sysconf */
+    public native String getTotalRamNative();
+    /** Get total RAM in MB via syscall reading /proc/meminfo */
+    public native String getTotalRamSyscall();
+
+    /** Get screen virtual size via native libc */
+    public native String getScreenInfoNative();
+    /** Get screen virtual size via syscall */
+    public native String getScreenInfoSyscall();
+
+    /** Get CPU ABI via native __system_property_get */
+    public native String getCpuAbiNative();
+    /** Get CPU ABI via syscall reading build.prop */
+    public native String getCpuAbiSyscall();
+
+    /** Get sensor list from /sys/class/sensors via native opendir */
+    public native String getSensorListNative();
+    /** Get sensor list from /sys/class/sensors via syscall getdents64 */
+    public native String getSensorListSyscall();
+
+    /** Get hash of library names from /proc/self/maps via native */
+    public native String getMapsHashNative();
+    /** Get hash of library names from /proc/self/maps via syscall */
+    public native String getMapsHashSyscall();
+
+    /** Get uname info (sysname release machine) via native uname() */
+    public native String getUnameInfoNative();
+    /** Get uname info via direct SYS_uname syscall */
+    public native String getUnameInfoSyscall();
+
+    /** Get total storage in GB via native statfs on /data */
+    public native String getTotalStorageNative();
+    /** Get total storage in GB via SYS_statfs syscall on /data */
+    public native String getTotalStorageSyscall();
+
+    /** Get device-tree serial from /proc/device-tree/serial-number via native */
+    public native String getDeviceTreeSerialNative();
+    /** Get device-tree serial from /proc/device-tree/serial-number via syscall */
+    public native String getDeviceTreeSerialSyscall();
+
+    // ===================== SVC Fingerprint: Runtime Verification =====================
+
+    /** Get CPU max frequency pattern (e.g. "1800000,1800000,2400000") via native fopen */
+    public native String getCpuFreqPatternNative();
+    /** Get CPU max frequency pattern via syscall */
+    public native String getCpuFreqPatternSyscall();
+
+    /** Get /etc/hosts file hash via native fopen */
+    public native String getHostsHashNative();
+    /** Get /etc/hosts file hash via syscall */
+    public native String getHostsHashSyscall();
+
+    /** Get SELinux state "Enforcing|u:r:untrusted_app" via native */
+    public native String getSELinuxFingerprintNative();
+    /** Get SELinux state via syscall */
+    public native String getSELinuxFingerprintSyscall();
+
+    /** Get process cmdline (package name) via native fopen */
+    public native String getCmdlineNative();
+    /** Get process cmdline via syscall */
+    public native String getCmdlineSyscall();
+
     // Singleton instance
     private static NativeDetector instance;
 

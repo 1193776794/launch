@@ -8,7 +8,12 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
+#include <sys/utsname.h>
 #include <sys/syscall.h>
+#include <algorithm>
+#include <vector>
+#include <set>
 #include <linux/limits.h>
 #include <android/log.h>
 #include <sys/system_properties.h>
@@ -1566,6 +1571,502 @@ Java_com_xff_launch_detector_NativeDetector_getBootParamSyscall(JNIEnv *env, job
     std::string value = extract_boot_param(cmdline, paramStr);
     env->ReleaseStringUTFChars(paramName, paramStr);
     return env->NewStringUTF(value.c_str());
+}
+
+// ===================== Extended Fingerprint Collection =====================
+
+// --- 1. MAC Address ---
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getMacAddressNative(JNIEnv *env, jobject thiz) {
+    // Try wlan0 first, then eth0
+    const char* paths[] = {
+        "/sys/class/net/wlan0/address",
+        "/sys/class/net/eth0/address"
+    };
+    for (const char* path : paths) {
+        std::string mac = read_file_native(path, 64);
+        if (!mac.empty() && mac != "00:00:00:00:00:00") {
+            return env->NewStringUTF(mac.c_str());
+        }
+    }
+    return env->NewStringUTF("");
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getMacAddressSyscall(JNIEnv *env, jobject thiz) {
+    const char* paths[] = {
+        "/sys/class/net/wlan0/address",
+        "/sys/class/net/eth0/address"
+    };
+    for (const char* path : paths) {
+        std::string mac = syscall_read_file(path, 64);
+        // Trim whitespace
+        while (!mac.empty() && (mac.back() == '\n' || mac.back() == '\r' || mac.back() == ' ')) {
+            mac.pop_back();
+        }
+        if (!mac.empty() && mac != "00:00:00:00:00:00") {
+            return env->NewStringUTF(mac.c_str());
+        }
+    }
+    return env->NewStringUTF("");
+}
+
+// --- 2. Total RAM ---
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getTotalRamNative(JNIEnv *env, jobject thiz) {
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long pageSize = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && pageSize > 0) {
+        long totalMB = (pages / 1024) * (pageSize / 1024);
+        std::string result = std::to_string(totalMB) + " MB";
+        return env->NewStringUTF(result.c_str());
+    }
+    return env->NewStringUTF("");
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getTotalRamSyscall(JNIEnv *env, jobject thiz) {
+    std::string meminfo = syscall_read_file("/proc/meminfo", 4096);
+    // Parse "MemTotal:       XXXXX kB"
+    std::string memTotal = extract_value(meminfo, "MemTotal", ':');
+    if (!memTotal.empty()) {
+        // Extract numeric part (value is in kB)
+        long kb = 0;
+        for (char c : memTotal) {
+            if (c >= '0' && c <= '9') {
+                kb = kb * 10 + (c - '0');
+            } else if (kb > 0) {
+                break; // Stop at first non-digit after digits
+            }
+        }
+        if (kb > 0) {
+            long mb = kb / 1024;
+            std::string result = std::to_string(mb) + " MB";
+            return env->NewStringUTF(result.c_str());
+        }
+    }
+    return env->NewStringUTF("");
+}
+
+// --- 3. Screen Info ---
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getScreenInfoNative(JNIEnv *env, jobject thiz) {
+    std::string info = read_file_native("/sys/class/graphics/fb0/virtual_size", 64);
+    return env->NewStringUTF(info.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getScreenInfoSyscall(JNIEnv *env, jobject thiz) {
+    std::string info = syscall_read_file("/sys/class/graphics/fb0/virtual_size", 64);
+    // Trim
+    while (!info.empty() && (info.back() == '\n' || info.back() == '\r' || info.back() == ' ')) {
+        info.pop_back();
+    }
+    return env->NewStringUTF(info.c_str());
+}
+
+// --- 4. CPU ABI ---
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getCpuAbiNative(JNIEnv *env, jobject thiz) {
+    char value[256] = {0};
+    __system_property_get("ro.product.cpu.abi", value);
+    return env->NewStringUTF(value);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getCpuAbiSyscall(JNIEnv *env, jobject thiz) {
+    // Try /system/build.prop first, then /vendor/build.prop
+    const char* propFiles[] = {
+        "/system/build.prop",
+        "/vendor/build.prop",
+        "/default.prop"
+    };
+    for (const char* file : propFiles) {
+        std::string content = syscall_read_file(file, 32768);
+        std::string searchKey = "ro.product.cpu.abi=";
+        size_t pos = content.find(searchKey);
+        if (pos != std::string::npos) {
+            size_t start = pos + searchKey.length();
+            size_t end = content.find('\n', start);
+            std::string val = (end != std::string::npos) ?
+                content.substr(start, end - start) : content.substr(start);
+            // Trim
+            while (!val.empty() && (val.back() == '\r' || val.back() == ' ')) {
+                val.pop_back();
+            }
+            if (!val.empty()) {
+                return env->NewStringUTF(val.c_str());
+            }
+        }
+    }
+    return env->NewStringUTF("");
+}
+
+// --- 5. Sensor List ---
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getSensorListNative(JNIEnv *env, jobject thiz) {
+    std::string result;
+    // Try /sys/class/sensors/ directory
+    DIR* dir = opendir("/sys/class/sensors");
+    if (dir) {
+        std::vector<std::string> names;
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (entry->d_name[0] != '.') {
+                names.push_back(entry->d_name);
+            }
+        }
+        closedir(dir);
+        std::sort(names.begin(), names.end());
+        for (size_t i = 0; i < names.size(); i++) {
+            if (i > 0) result += ",";
+            result += names[i];
+        }
+    }
+    // Fallback: try /sys/bus/iio/devices/ for some devices
+    if (result.empty()) {
+        DIR* dir2 = opendir("/sys/bus/iio/devices");
+        if (dir2) {
+            std::vector<std::string> names;
+            struct dirent* entry;
+            while ((entry = readdir(dir2)) != nullptr) {
+                if (entry->d_name[0] != '.') {
+                    names.push_back(entry->d_name);
+                }
+            }
+            closedir(dir2);
+            std::sort(names.begin(), names.end());
+            for (size_t i = 0; i < names.size(); i++) {
+                if (i > 0) result += ",";
+                result += names[i];
+            }
+        }
+    }
+    return env->NewStringUTF(result.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getSensorListSyscall(JNIEnv *env, jobject thiz) {
+    std::string result;
+    // Use syscall to open and enumerate /sys/class/sensors/
+    const char* sensorDirs[] = {"/sys/class/sensors", "/sys/bus/iio/devices"};
+    for (const char* dirPath : sensorDirs) {
+        int fd = syscall(__NR_openat, AT_FDCWD, dirPath, O_RDONLY | O_DIRECTORY);
+        if (fd >= 0) {
+            char buf[4096];
+            std::vector<std::string> names;
+            int nread;
+            while ((nread = syscall(__NR_getdents64, fd, buf, sizeof(buf))) > 0) {
+                int offset = 0;
+                while (offset < nread) {
+                    struct linux_dirent64* de = (struct linux_dirent64*)(buf + offset);
+                    if (de->d_name[0] != '.') {
+                        names.push_back(de->d_name);
+                    }
+                    offset += de->d_reclen;
+                }
+            }
+            syscall(__NR_close, fd);
+            std::sort(names.begin(), names.end());
+            for (size_t i = 0; i < names.size(); i++) {
+                if (i > 0) result += ",";
+                result += names[i];
+            }
+            if (!result.empty()) break;
+        }
+    }
+    return env->NewStringUTF(result.c_str());
+}
+
+// --- 6. /proc/self/maps hash ---
+
+static uint32_t simple_hash(const std::string& str) {
+    uint32_t hash = 5381;
+    for (char c : str) {
+        hash = ((hash << 5) + hash) + (uint32_t)c;
+    }
+    return hash;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getMapsHashNative(JNIEnv *env, jobject thiz) {
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) return env->NewStringUTF("");
+
+    std::set<std::string> libs;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        // Extract library path: last field after spaces, starting with /
+        char* path = strrchr(line, '/');
+        if (path) {
+            // Trim newline
+            char* nl = strchr(path, '\n');
+            if (nl) *nl = '\0';
+            libs.insert(path);
+        }
+    }
+    fclose(fp);
+
+    // Concatenate sorted lib names and hash
+    std::string combined;
+    for (const auto& lib : libs) {
+        combined += lib;
+        combined += ";";
+    }
+
+    uint32_t hash = simple_hash(combined);
+    char hashStr[32];
+    snprintf(hashStr, sizeof(hashStr), "%08x", hash);
+    return env->NewStringUTF(hashStr);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getMapsHashSyscall(JNIEnv *env, jobject thiz) {
+    std::string maps = syscall_read_file("/proc/self/maps", 262144);
+    if (maps.empty()) return env->NewStringUTF("");
+
+    std::set<std::string> libs;
+    size_t pos = 0;
+    while (pos < maps.size()) {
+        size_t lineEnd = maps.find('\n', pos);
+        if (lineEnd == std::string::npos) lineEnd = maps.size();
+
+        std::string line = maps.substr(pos, lineEnd - pos);
+        size_t slashPos = line.rfind('/');
+        if (slashPos != std::string::npos) {
+            std::string libPath = line.substr(slashPos);
+            // Trim trailing whitespace
+            while (!libPath.empty() && (libPath.back() == ' ' || libPath.back() == '\r')) {
+                libPath.pop_back();
+            }
+            libs.insert(libPath);
+        }
+        pos = lineEnd + 1;
+    }
+
+    std::string combined;
+    for (const auto& lib : libs) {
+        combined += lib;
+        combined += ";";
+    }
+
+    uint32_t hash = simple_hash(combined);
+    char hashStr[32];
+    snprintf(hashStr, sizeof(hashStr), "%08x", hash);
+    return env->NewStringUTF(hashStr);
+}
+
+// --- 7. uname info ---
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getUnameInfoNative(JNIEnv *env, jobject thiz) {
+    struct utsname info;
+    if (uname(&info) == 0) {
+        // Format: "machine sysname" to match Java's os.arch + os.name
+        std::string result = std::string(info.machine) + " " +
+                             std::string(info.sysname);
+        return env->NewStringUTF(result.c_str());
+    }
+    return env->NewStringUTF("");
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getUnameInfoSyscall(JNIEnv *env, jobject thiz) {
+    struct utsname info;
+    memset(&info, 0, sizeof(info));
+    long ret = syscall(__NR_uname, &info);
+    if (ret == 0) {
+        // Format: "machine sysname" to match Java's os.arch + os.name
+        std::string result = std::string(info.machine) + " " +
+                             std::string(info.sysname);
+        return env->NewStringUTF(result.c_str());
+    }
+    return env->NewStringUTF("");
+}
+
+// --- 8. Total Storage ---
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getTotalStorageNative(JNIEnv *env, jobject thiz) {
+    struct statfs sf;
+    if (statfs("/data", &sf) == 0) {
+        long long totalBytes = (long long)sf.f_blocks * (long long)sf.f_bsize;
+        long long totalGB = totalBytes / (1024LL * 1024LL * 1024LL);
+        std::string result = std::to_string(totalGB) + " GB";
+        return env->NewStringUTF(result.c_str());
+    }
+    return env->NewStringUTF("");
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getTotalStorageSyscall(JNIEnv *env, jobject thiz) {
+    struct statfs sf;
+    memset(&sf, 0, sizeof(sf));
+    long ret = syscall(__NR_statfs, "/data", &sf);
+    if (ret == 0 && sf.f_blocks > 0) {
+        long long totalBytes = (long long)sf.f_blocks * (long long)sf.f_bsize;
+        long long totalGB = totalBytes / (1024LL * 1024LL * 1024LL);
+        std::string result = std::to_string(totalGB) + " GB";
+        return env->NewStringUTF(result.c_str());
+    }
+    return env->NewStringUTF("");
+}
+
+// --- 9. Device-tree Serial ---
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getDeviceTreeSerialNative(JNIEnv *env, jobject thiz) {
+    std::string serial = read_file_native("/proc/device-tree/serial-number", 256);
+    // Remove null bytes that may exist in device-tree strings
+    serial.erase(std::remove(serial.begin(), serial.end(), '\0'), serial.end());
+    return env->NewStringUTF(serial.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getDeviceTreeSerialSyscall(JNIEnv *env, jobject thiz) {
+    std::string serial = syscall_read_file("/proc/device-tree/serial-number", 256);
+    // Trim trailing whitespace/nulls
+    while (!serial.empty() && (serial.back() == '\n' || serial.back() == '\r' ||
+           serial.back() == ' ' || serial.back() == '\0')) {
+        serial.pop_back();
+    }
+    return env->NewStringUTF(serial.c_str());
+}
+
+// ===================== SVC Fingerprint: Runtime Verification =====================
+
+// --- CPU Frequency Pattern ---
+
+static std::string collect_cpu_freq(bool use_syscall) {
+    std::string result;
+    for (int i = 0; i < 16; i++) {
+        char path[128];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+        std::string freq = use_syscall
+            ? syscall_read_file(path, 32)
+            : read_file_native(path, 32);
+        while (!freq.empty() && (freq.back() == '\n' || freq.back() == '\r' || freq.back() == ' ')) {
+            freq.pop_back();
+        }
+        if (freq.empty()) break;
+        if (!result.empty()) result += ",";
+        result += freq;
+    }
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getCpuFreqPatternNative(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(collect_cpu_freq(false).c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getCpuFreqPatternSyscall(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(collect_cpu_freq(true).c_str());
+}
+
+// --- /etc/hosts Hash ---
+
+static std::string compute_hosts_hash(bool use_syscall) {
+    const char* paths[] = {"/etc/hosts", "/system/etc/hosts"};
+    for (const char* path : paths) {
+        std::string content = use_syscall
+            ? syscall_read_file(path, 16384)
+            : read_file_native(path, 16384);
+        if (!content.empty()) {
+            uint32_t hash = simple_hash(content);
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%08x", hash);
+            return buf;
+        }
+    }
+    return "";
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getHostsHashNative(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(compute_hosts_hash(false).c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getHostsHashSyscall(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(compute_hosts_hash(true).c_str());
+}
+
+// --- SELinux Fingerprint ---
+
+static std::string collect_selinux_fp(bool use_syscall) {
+    std::string enforce = use_syscall
+        ? syscall_read_file("/sys/fs/selinux/enforce", 8)
+        : read_file_native("/sys/fs/selinux/enforce", 8);
+    while (!enforce.empty() && (enforce.back() == '\n' || enforce.back() == '\r' || enforce.back() == ' ')) {
+        enforce.pop_back();
+    }
+    std::string state = (enforce == "1") ? "Enforcing" : "Permissive";
+
+    std::string context = use_syscall
+        ? syscall_read_file("/proc/self/attr/current", 256)
+        : read_file_native("/proc/self/attr/current", 256);
+    while (!context.empty() && (context.back() == '\0' || context.back() == '\n' ||
+           context.back() == '\r' || context.back() == ' ')) {
+        context.pop_back();
+    }
+    // Truncate at 3rd colon: "u:r:untrusted_app:s0:c512" -> "u:r:untrusted_app"
+    int colonCount = 0;
+    for (size_t i = 0; i < context.size(); i++) {
+        if (context[i] == ':') {
+            colonCount++;
+            if (colonCount == 3) {
+                context = context.substr(0, i);
+                break;
+            }
+        }
+    }
+
+    return state + "|" + context;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getSELinuxFingerprintNative(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(collect_selinux_fp(false).c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getSELinuxFingerprintSyscall(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(collect_selinux_fp(true).c_str());
+}
+
+// --- Process Cmdline (Package Name) ---
+
+static std::string read_cmdline(bool use_syscall) {
+    std::string cmdline = use_syscall
+        ? syscall_read_file("/proc/self/cmdline", 256)
+        : read_file_native("/proc/self/cmdline", 256);
+    std::string clean;
+    for (char c : cmdline) {
+        if (c == '\0') break;
+        clean += c;
+    }
+    while (!clean.empty() && (clean.back() == '\n' || clean.back() == '\r' || clean.back() == ' ')) {
+        clean.pop_back();
+    }
+    return clean;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getCmdlineNative(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(read_cmdline(false).c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getCmdlineSyscall(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(read_cmdline(true).c_str());
 }
 
 // ===================== System Library Integrity Detection =====================
