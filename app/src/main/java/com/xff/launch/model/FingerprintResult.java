@@ -17,6 +17,12 @@ public class FingerprintResult {
     private boolean tamperingDetected;
     private long collectTime;
 
+    // Runtime integrity penalties
+    private int rwxPenalty;
+    private int urandomPenalty;
+    private int mmapPenalty;
+    private int persistentPenalty;
+
     public FingerprintResult() {
         this.items = new ArrayList<>();
         this.trustLevel = 100;
@@ -84,12 +90,23 @@ public class FingerprintResult {
         this.collectTime = collectTime;
     }
 
+    public int getRwxPenalty() { return rwxPenalty; }
+    public void setRwxPenalty(int p) { this.rwxPenalty = p; }
+
+    public int getUrandomPenalty() { return urandomPenalty; }
+    public void setUrandomPenalty(int p) { this.urandomPenalty = p; }
+
+    public int getMmapPenalty() { return mmapPenalty; }
+    public void setMmapPenalty(int p) { this.mmapPenalty = p; }
+
+    public int getPersistentPenalty() { return persistentPenalty; }
+    public void setPersistentPenalty(int p) { this.persistentPenalty = p; }
+
     /**
-     * Calculate trust level based on consistency of fingerprint items
+     * Calculate trust level based on consistency + runtime integrity indicators
      */
     public void calculateTrustLevel() {
         int inconsistentCount = 0;
-        int totalItems = items.size();
 
         for (FingerprintItem item : items) {
             if (!item.isConsistent()) {
@@ -97,16 +114,20 @@ public class FingerprintResult {
             }
         }
 
-        if (totalItems == 0) {
+        if (items.isEmpty()) {
             trustLevel = 100;
             tamperingDetected = false;
             return;
         }
 
-        // Each inconsistent item reduces trust by 15%
-        int reduction = (inconsistentCount * 15);
-        trustLevel = Math.max(0, 100 - reduction);
-        tamperingDetected = inconsistentCount > 0;
+        // Consistency penalty: 15 per inconsistent item
+        int consistencyReduction = inconsistentCount * 15;
+        // Runtime integrity penalties
+        int runtimeReduction = rwxPenalty + urandomPenalty + mmapPenalty + persistentPenalty;
+        int totalReduction = consistencyReduction + runtimeReduction;
+
+        trustLevel = Math.max(0, 100 - totalReduction);
+        tamperingDetected = totalReduction > 0;
     }
 
     /**
