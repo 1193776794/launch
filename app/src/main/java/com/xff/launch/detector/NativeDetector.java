@@ -374,6 +374,21 @@ public class NativeDetector {
     /** Get process cmdline via syscall */
     public native String getCmdlineSyscall();
 
+    // ===================== Runtime Integrity Indicators =====================
+
+    /** Read system property via direct mmap of build.prop files (bypasses __system_property_get) */
+    public native String getPropertyMmap(String propName);
+
+    /** Compare mmap vs __system_property_get for 5 key properties, returns mismatch count */
+    public native int checkPropertyMmapConsistency();
+
+    /** Read 16 bytes from /dev/urandom via native fopen, returns hex string */
+    public native String readUrandomNative();
+    /** Read 16 bytes from /dev/urandom via syscall, returns hex string */
+    public native String readUrandomSyscall();
+    /** Check if urandom returns all zeros or fixed pattern, returns true if anomaly */
+    public native boolean checkUrandomIntegrity();
+
     // Singleton instance
     private static NativeDetector instance;
 

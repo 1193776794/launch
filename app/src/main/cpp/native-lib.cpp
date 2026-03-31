@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/vfs.h>
 #include <sys/utsname.h>
 #include <sys/syscall.h>
@@ -2067,6 +2068,135 @@ Java_com_xff_launch_detector_NativeDetector_getCmdlineNative(JNIEnv *env, jobjec
 JNIEXPORT jstring JNICALL
 Java_com_xff_launch_detector_NativeDetector_getCmdlineSyscall(JNIEnv *env, jobject thiz) {
     return env->NewStringUTF(read_cmdline(true).c_str());
+}
+
+// ===================== Runtime Integrity Indicators =====================
+
+// --- System Property mmap Direct Read ---
+
+static std::string mmap_read_property(const char* prop_name) {
+    const char* prop_files[] = {
+        "/system/build.prop",
+        "/vendor/build.prop",
+        "/system/default.prop",
+        "/vendor/default.prop",
+        "/odm/build.prop"
+    };
+
+    std::string search_key = std::string(prop_name) + "=";
+
+    for (const char* file : prop_files) {
+        int fd = syscall_open(file, O_RDONLY);
+        if (fd < 0) continue;
+
+        struct stat st;
+        if (syscall_stat(file, &st) != 0 || st.st_size <= 0) {
+            syscall_close(fd);
+            continue;
+        }
+
+        void* mapped = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        syscall_close(fd);
+
+        if (mapped == MAP_FAILED) continue;
+
+        std::string content((const char*)mapped, st.st_size);
+        munmap(mapped, st.st_size);
+
+        size_t pos = content.find(search_key);
+        if (pos != std::string::npos) {
+            size_t val_start = pos + search_key.length();
+            size_t val_end = content.find('\n', val_start);
+            std::string val = (val_end != std::string::npos)
+                ? content.substr(val_start, val_end - val_start)
+                : content.substr(val_start);
+            while (!val.empty() && (val.back() == '\r' || val.back() == ' ')) {
+                val.pop_back();
+            }
+            if (!val.empty()) return val;
+        }
+    }
+    return "";
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getPropertyMmap(JNIEnv *env, jobject thiz, jstring propName) {
+    const char* name = env->GetStringUTFChars(propName, nullptr);
+    std::string val = mmap_read_property(name);
+    env->ReleaseStringUTFChars(propName, name);
+    return env->NewStringUTF(val.c_str());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkPropertyMmapConsistency(JNIEnv *env, jobject thiz) {
+    const char* keys[] = {
+        "ro.serialno",
+        "ro.product.model",
+        "ro.product.brand",
+        "ro.build.fingerprint",
+        "ro.product.device"
+    };
+
+    int mismatch = 0;
+    for (const char* key : keys) {
+        char native_val[256] = {0};
+        __system_property_get(key, native_val);
+
+        std::string mmap_val = mmap_read_property(key);
+
+        if (!mmap_val.empty() && strlen(native_val) > 0) {
+            if (mmap_val != std::string(native_val)) {
+                mismatch++;
+            }
+        }
+    }
+    return mismatch;
+}
+
+// --- /dev/urandom Integrity Check ---
+
+static std::string read_urandom_hex(bool use_syscall) {
+    unsigned char buf[16] = {0};
+    if (use_syscall) {
+        int fd = syscall_open("/dev/urandom", O_RDONLY);
+        if (fd >= 0) {
+            syscall_read(fd, buf, 16);
+            syscall_close(fd);
+        }
+    } else {
+        FILE* fp = fopen("/dev/urandom", "rb");
+        if (fp) {
+            fread(buf, 1, 16, fp);
+            fclose(fp);
+        }
+    }
+    char hex[33] = {0};
+    for (int i = 0; i < 16; i++) {
+        snprintf(hex + i * 2, 3, "%02x", buf[i]);
+    }
+    return hex;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_readUrandomNative(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(read_urandom_hex(false).c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_readUrandomSyscall(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(read_urandom_hex(true).c_str());
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkUrandomIntegrity(JNIEnv *env, jobject thiz) {
+    std::string r1 = read_urandom_hex(true);
+    std::string r2 = read_urandom_hex(true);
+    std::string r3 = read_urandom_hex(true);
+
+    bool all_zero = (r1 == "00000000000000000000000000000000");
+    bool all_same = (r1 == r2 && r2 == r3);
+
+    return (jboolean)(all_zero || all_same);
 }
 
 // ===================== System Library Integrity Detection =====================
