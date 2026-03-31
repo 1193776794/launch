@@ -12,9 +12,10 @@ import android.util.Base64;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ImageButton;
-import android.widget.ImageView;
-import android.widget.ProgressBar;
+
+import android.content.res.ColorStateList;
+
+import com.google.android.material.progressindicator.LinearProgressIndicator;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -31,11 +32,22 @@ import com.xff.launch.detector.NativeDetector;
 import com.xff.launch.model.DetectionLayer;
 import com.xff.launch.model.FingerprintItem;
 import com.xff.launch.model.FingerprintResult;
+import com.xff.launch.util.PersistentFingerprint;
 import com.xff.launch.util.ReflectionUtils;
 
+import android.app.ActivityManager;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.StatFs;
+import android.text.TextUtils;
+import android.util.DisplayMetrics;
+
+import java.net.NetworkInterface;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.TimeZone;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -49,18 +61,18 @@ public class FingerprintFragment extends Fragment {
     private TextView tvDeviceFingerprint;
     private TextView tvTrustLevel;
     private TextView tvTamperingStatus;
-    private ImageView ivStatusIcon;
-    private ProgressBar progressTrust;
+    private View ivStatusIcon;
+    private LinearProgressIndicator progressTrust;
     private TextView tvHardwareHash;
     private TextView tvSoftwareHash;
     private TextView tvBuildFingerprint;
     private RecyclerView recyclerIdentifiers;
     private RecyclerView recyclerComparison;
 
-    private ImageButton btnCopyFingerprint;
-    private ImageButton btnCopyHwHash;
-    private ImageButton btnCopySwHash;
-    private ImageButton btnCopyBuildFp;
+    private View btnCopyFingerprint;
+    private View btnCopyHwHash;
+    private View btnCopySwHash;
+    private View btnCopyBuildFp;
 
     private ExecutorService executor;
     private FingerprintResult currentResult;
@@ -90,16 +102,27 @@ public class FingerprintFragment extends Fragment {
         tvTamperingStatus = view.findViewById(R.id.tv_tampering_status);
         ivStatusIcon = view.findViewById(R.id.iv_status_icon);
         progressTrust = view.findViewById(R.id.progress_trust);
-        tvHardwareHash = view.findViewById(R.id.tv_hardware_hash);
-        tvSoftwareHash = view.findViewById(R.id.tv_software_hash);
-        tvBuildFingerprint = view.findViewById(R.id.tv_build_fingerprint);
+        // Hash rows use include layout - find views inside included layouts
+        View layoutHwHash = view.findViewById(R.id.layout_hw_hash);
+        View layoutSwHash = view.findViewById(R.id.layout_sw_hash);
+        View layoutBuildFp = view.findViewById(R.id.layout_build_fp);
+
+        tvHardwareHash = layoutHwHash.findViewById(R.id.tv_hash_value);
+        tvSoftwareHash = layoutSwHash.findViewById(R.id.tv_hash_value);
+        tvBuildFingerprint = layoutBuildFp.findViewById(R.id.tv_hash_value);
+
+        // Set labels for hash rows
+        ((TextView) layoutHwHash.findViewById(R.id.tv_hash_label)).setText(R.string.hardware_fingerprint);
+        ((TextView) layoutSwHash.findViewById(R.id.tv_hash_label)).setText(R.string.software_fingerprint);
+        ((TextView) layoutBuildFp.findViewById(R.id.tv_hash_label)).setText(R.string.build_fingerprint);
+
         recyclerIdentifiers = view.findViewById(R.id.recycler_identifiers);
         recyclerComparison = view.findViewById(R.id.recycler_comparison);
 
         btnCopyFingerprint = view.findViewById(R.id.btn_copy_fingerprint);
-        btnCopyHwHash = view.findViewById(R.id.btn_copy_hw_hash);
-        btnCopySwHash = view.findViewById(R.id.btn_copy_sw_hash);
-        btnCopyBuildFp = view.findViewById(R.id.btn_copy_build_fp);
+        btnCopyHwHash = layoutHwHash.findViewById(R.id.btn_copy);
+        btnCopySwHash = layoutSwHash.findViewById(R.id.btn_copy);
+        btnCopyBuildFp = layoutBuildFp.findViewById(R.id.btn_copy);
 
         swipeRefresh.setColorSchemeResources(R.color.primary);
         swipeRefresh.setOnRefreshListener(this::collectFingerprints);
@@ -443,26 +466,435 @@ public class FingerprintFragment extends Fragment {
         board.setLayerValue(DetectionLayer.SYSCALL, syscallBoard);
         items.add(board);
 
+        // ==================== Extended Identifiers ====================
+
+        // Manufacturer (制造商)
+        FingerprintItem manufacturer = new FingerprintItem("manufacturer", "制造商");
+        String reflectManufacturer = ReflectionUtils.getManufacturer();
+        String directManufacturer = Build.MANUFACTURER;
+        String propManufacturer = ReflectionUtils.getSystemProperty("ro.product.manufacturer");
+        String vendorManufacturer = ReflectionUtils.getSystemProperty("ro.product.vendor.manufacturer");
+        String odmManufacturer = ReflectionUtils.getSystemProperty("ro.product.odm.manufacturer");
+        String nativeManufacturer = nativeDetector.getBuildPropertyNative("ro.product.manufacturer");
+        String syscallManufacturer = nonEmpty(nativeDetector.getBuildPropertySyscall("ro.product.manufacturer"),
+                nativeDetector.getBuildPropertySyscall("ro.product.vendor.manufacturer"));
+        String javaManufacturer = nonEmpty(reflectManufacturer, directManufacturer, propManufacturer, vendorManufacturer, odmManufacturer);
+        manufacturer.setLayerValue(DetectionLayer.JAVA, javaManufacturer.isEmpty() ? "N/A" : javaManufacturer);
+        manufacturer.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeManufacturer, propManufacturer).isEmpty() ? "N/A" : nonEmpty(nativeManufacturer, propManufacturer));
+        manufacturer.setLayerValue(DetectionLayer.SYSCALL, syscallManufacturer.isEmpty() ? "N/A" : syscallManufacturer);
+        items.add(manufacturer);
+
+        // Product (产品名)
+        FingerprintItem product = new FingerprintItem("product", "产品名");
+        String reflectProduct = ReflectionUtils.getProduct();
+        String directProduct = Build.PRODUCT;
+        String propProduct = ReflectionUtils.getSystemProperty("ro.product.name");
+        String vendorProduct = ReflectionUtils.getSystemProperty("ro.product.vendor.name");
+        String odmProduct = ReflectionUtils.getSystemProperty("ro.product.odm.name");
+        String nativeProduct = nativeDetector.getBuildPropertyNative("ro.product.name");
+        String syscallProduct = nonEmpty(nativeDetector.getBuildPropertySyscall("ro.product.name"),
+                nativeDetector.getBuildPropertySyscall("ro.product.vendor.name"));
+        String javaProduct = nonEmpty(reflectProduct, directProduct, propProduct, vendorProduct, odmProduct);
+        product.setLayerValue(DetectionLayer.JAVA, javaProduct.isEmpty() ? "N/A" : javaProduct);
+        product.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeProduct, propProduct).isEmpty() ? "N/A" : nonEmpty(nativeProduct, propProduct));
+        product.setLayerValue(DetectionLayer.SYSCALL, syscallProduct.isEmpty() ? "N/A" : syscallProduct);
+        items.add(product);
+
+        // Build Type (构建类型)
+        FingerprintItem buildType = new FingerprintItem("build_type", "构建类型");
+        String reflectType = ReflectionUtils.getBuildField("TYPE");
+        String propType = ReflectionUtils.getSystemProperty("ro.build.type");
+        String nativeType = nativeDetector.getBuildPropertyNative("ro.build.type");
+        String syscallType = nativeDetector.getBuildPropertySyscall("ro.build.type");
+        buildType.setLayerValue(DetectionLayer.JAVA, nonEmpty(reflectType, propType));
+        buildType.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeType, propType));
+        buildType.setLayerValue(DetectionLayer.SYSCALL, syscallType);
+        items.add(buildType);
+
+        // Build Tags (构建标签)
+        FingerprintItem buildTags = new FingerprintItem("build_tags", "构建标签");
+        String reflectTags = ReflectionUtils.getBuildField("TAGS");
+        String propTags = ReflectionUtils.getSystemProperty("ro.build.tags");
+        String nativeTags = nativeDetector.getBuildPropertyNative("ro.build.tags");
+        String syscallTags = nativeDetector.getBuildPropertySyscall("ro.build.tags");
+        buildTags.setLayerValue(DetectionLayer.JAVA, nonEmpty(reflectTags, propTags));
+        buildTags.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeTags, propTags));
+        buildTags.setLayerValue(DetectionLayer.SYSCALL, syscallTags);
+        items.add(buildTags);
+
+        // Android Version (Android 版本)
+        FingerprintItem androidVersion = new FingerprintItem("android_version", "Android 版本");
+        String reflectRelease = ReflectionUtils.getBuildVersionField("RELEASE");
+        String propRelease = ReflectionUtils.getSystemProperty("ro.build.version.release");
+        String nativeRelease = nativeDetector.getBuildPropertyNative("ro.build.version.release");
+        String syscallRelease = nativeDetector.getBuildPropertySyscall("ro.build.version.release");
+        androidVersion.setLayerValue(DetectionLayer.JAVA, nonEmpty(reflectRelease, propRelease));
+        androidVersion.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeRelease, propRelease));
+        androidVersion.setLayerValue(DetectionLayer.SYSCALL, syscallRelease);
+        items.add(androidVersion);
+
+        // SDK Level (API 级别)
+        FingerprintItem sdkLevel = new FingerprintItem("sdk_level", "API 级别");
+        String reflectSdk = ReflectionUtils.getBuildVersionField("SDK_INT");
+        String propSdk = ReflectionUtils.getSystemProperty("ro.build.version.sdk");
+        String nativeSdk = nativeDetector.getBuildPropertyNative("ro.build.version.sdk");
+        String syscallSdk = nativeDetector.getBuildPropertySyscall("ro.build.version.sdk");
+        sdkLevel.setLayerValue(DetectionLayer.JAVA, nonEmpty(reflectSdk, propSdk));
+        sdkLevel.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeSdk, propSdk));
+        sdkLevel.setLayerValue(DetectionLayer.SYSCALL, syscallSdk);
+        items.add(sdkLevel);
+
+        // Security Patch (安全补丁)
+        FingerprintItem securityPatch = new FingerprintItem("security_patch", "安全补丁");
+        String reflectPatch = ReflectionUtils.getBuildVersionField("SECURITY_PATCH");
+        String propPatch = ReflectionUtils.getSystemProperty("ro.build.version.security_patch");
+        String nativePatch = nativeDetector.getBuildPropertyNative("ro.build.version.security_patch");
+        String syscallPatch = nativeDetector.getBuildPropertySyscall("ro.build.version.security_patch");
+        securityPatch.setLayerValue(DetectionLayer.JAVA, nonEmpty(reflectPatch, propPatch));
+        securityPatch.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativePatch, propPatch));
+        securityPatch.setLayerValue(DetectionLayer.SYSCALL, syscallPatch);
+        items.add(securityPatch);
+
+        // MAC Address (MAC 地址)
+        FingerprintItem macAddress = new FingerprintItem("mac_address", "MAC 地址");
+        String javaMac = "";
+        try {
+            NetworkInterface wlan0 = NetworkInterface.getByName("wlan0");
+            if (wlan0 != null) {
+                byte[] macBytes = wlan0.getHardwareAddress();
+                if (macBytes != null && macBytes.length > 0) {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < macBytes.length; i++) {
+                        sb.append(String.format("%02X", macBytes[i]));
+                        if (i < macBytes.length - 1) sb.append(":");
+                    }
+                    javaMac = sb.toString();
+                }
+            }
+        } catch (Exception e) {
+            // NetworkInterface access may fail
+        }
+        String fileMac = ReflectionUtils.readFileFirstLine("/sys/class/net/wlan0/address");
+        String nativeMac = nativeDetector.getMacAddressNative();
+        String syscallMac = nativeDetector.getMacAddressSyscall();
+        macAddress.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaMac, fileMac, "N/A"));
+        macAddress.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeMac, fileMac, "N/A"));
+        macAddress.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallMac, fileMac, "N/A"));
+        items.add(macAddress);
+
+        // Total RAM (总内存) - 统一为MB单位，各层数值可能有微小差异，四舍五入到最近的128MB
+        FingerprintItem totalRam = new FingerprintItem("total_ram", "总内存");
+        String javaTotalRam = "";
+        try {
+            ActivityManager am = (ActivityManager) requireContext().getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                ActivityManager.MemoryInfo memInfo = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(memInfo);
+                long mb = memInfo.totalMem / (1024L * 1024L);
+                // 四舍五入到128MB边界，消除各层微小差异
+                mb = ((mb + 64) / 128) * 128;
+                javaTotalRam = mb + " MB";
+            }
+        } catch (Exception e) {
+            // ActivityManager access may fail
+        }
+        String nativeRam = nativeDetector.getTotalRamNative();
+        String syscallRam = nativeDetector.getTotalRamSyscall();
+        // Native/Syscall返回的也需要对齐到128MB
+        nativeRam = roundRamValue(nativeRam);
+        syscallRam = roundRamValue(syscallRam);
+        totalRam.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaTotalRam, "N/A"));
+        totalRam.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeRam, "N/A"));
+        totalRam.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallRam, "N/A"));
+        items.add(totalRam);
+
+        // Screen Resolution (屏幕分辨率)
+        FingerprintItem screenInfo = new FingerprintItem("screen_info", "屏幕分辨率");
+        String javaScreen = "";
+        try {
+            DisplayMetrics dm = requireContext().getResources().getDisplayMetrics();
+            javaScreen = dm.widthPixels + "x" + dm.heightPixels + "@" + dm.densityDpi;
+        } catch (Exception e) {
+            // DisplayMetrics access may fail
+        }
+        String nativeScreen = nativeDetector.getScreenInfoNative();
+        String syscallScreen = nativeDetector.getScreenInfoSyscall();
+        screenInfo.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaScreen, "N/A"));
+        screenInfo.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeScreen, "N/A"));
+        screenInfo.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallScreen, "N/A"));
+        items.add(screenInfo);
+
+        // CPU ABI (处理器架构) - 统一使用主ABI进行比对
+        FingerprintItem cpuAbi = new FingerprintItem("cpu_abi", "处理器架构");
+        String javaAbi = "";
+        try {
+            if (Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0) {
+                javaAbi = Build.SUPPORTED_ABIS[0]; // 只取主ABI，与Native/Syscall一致
+            }
+        } catch (Exception e) {
+            // SUPPORTED_ABIS access may fail
+        }
+        String propAbi = ReflectionUtils.getSystemProperty("ro.product.cpu.abi");
+        String nativeAbi = nativeDetector.getCpuAbiNative();
+        String syscallAbi = nativeDetector.getCpuAbiSyscall();
+        cpuAbi.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaAbi, propAbi, "N/A"));
+        cpuAbi.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeAbi, propAbi, "N/A"));
+        cpuAbi.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallAbi, propAbi, "N/A"));
+        items.add(cpuAbi);
+
+        // Timezone (时区)
+        FingerprintItem timezone = new FingerprintItem("timezone", "时区");
+        String javaTimezone = TimeZone.getDefault().getID();
+        String propTimezone = ReflectionUtils.getSystemProperty("persist.sys.timezone");
+        String nativeTimezone = nativeDetector.getBuildPropertyNative("persist.sys.timezone");
+        String syscallTimezone = nativeDetector.getBuildPropertySyscall("persist.sys.timezone");
+        timezone.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaTimezone, propTimezone));
+        timezone.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeTimezone, propTimezone));
+        timezone.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallTimezone, propTimezone));
+        items.add(timezone);
+
+        // Language (系统语言)
+        FingerprintItem language = new FingerprintItem("language", "系统语言");
+        String javaLanguage = Locale.getDefault().toString();
+        String propLang = ReflectionUtils.getSystemProperty("persist.sys.language");
+        String propCountry = ReflectionUtils.getSystemProperty("persist.sys.country");
+        String propLangFull = nonEmpty(propLang).isEmpty() ? "" : propLang + "_" + nonEmpty(propCountry);
+        String nativeLanguage = nativeDetector.getBuildPropertyNative("persist.sys.language");
+        String syscallLanguage = nativeDetector.getBuildPropertySyscall("persist.sys.language");
+        language.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaLanguage, propLangFull));
+        language.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeLanguage, propLang));
+        language.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallLanguage, propLang));
+        items.add(language);
+
+        // Total Storage (存储容量)
+        FingerprintItem totalStorage = new FingerprintItem("total_storage", "存储容量");
+        String javaStorage = "";
+        try {
+            StatFs statFs = new StatFs(android.os.Environment.getDataDirectory().getPath());
+            long totalBytes = statFs.getTotalBytes();
+            javaStorage = (totalBytes / (1024L * 1024L * 1024L)) + " GB";
+        } catch (Exception e) {
+            // StatFs access may fail
+        }
+        String nativeStorage = nativeDetector.getTotalStorageNative();
+        String syscallStorage = nativeDetector.getTotalStorageSyscall();
+        totalStorage.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaStorage, "N/A"));
+        totalStorage.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeStorage, "N/A"));
+        totalStorage.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallStorage, "N/A"));
+        items.add(totalStorage);
+
+        // Uname Info (内核架构信息)
+        FingerprintItem unameInfo = new FingerprintItem("uname_info", "内核架构信息");
+        String javaUname = nonEmpty(System.getProperty("os.arch")) + " " + nonEmpty(System.getProperty("os.name"));
+        String nativeUname = nativeDetector.getUnameInfoNative();
+        String syscallUname = nativeDetector.getUnameInfoSyscall();
+        unameInfo.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaUname.trim()));
+        unameInfo.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeUname, javaUname.trim()));
+        unameInfo.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallUname, javaUname.trim()));
+        items.add(unameInfo);
+
+        // GSF ID (Google Services Framework ID)
+        FingerprintItem gsfId = new FingerprintItem("gsf_id", "GSF ID");
+        String javaGsfId = "";
+        try {
+            Uri gsfUri = Uri.parse("content://com.google.android.gsf.gservices");
+            Cursor cursor = requireContext().getContentResolver().query(gsfUri, null, null, new String[]{"android_id"}, null);
+            if (cursor != null) {
+                if (cursor.moveToFirst() && cursor.getColumnCount() >= 2) {
+                    javaGsfId = cursor.getString(1);
+                }
+                cursor.close();
+            }
+        } catch (Exception e) {
+            // GMS may not be installed
+        }
+        gsfId.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaGsfId, "N/A"));
+        gsfId.setLayerValue(DetectionLayer.NATIVE, nonEmpty(javaGsfId, "N/A"));
+        gsfId.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(javaGsfId, "N/A"));
+        items.add(gsfId);
+
+        // ==================== SVC Runtime Verification Fingerprints ====================
+
+        // CPU Frequency Pattern (CPU 频率指纹)
+        FingerprintItem cpuFreq = new FingerprintItem("cpu_freq", "CPU 频率指纹");
+        String javaCpuFreq = collectCpuFreqJava();
+        String nativeCpuFreq = nativeDetector.getCpuFreqPatternNative();
+        String syscallCpuFreq = nativeDetector.getCpuFreqPatternSyscall();
+        cpuFreq.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaCpuFreq, "N/A"));
+        cpuFreq.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeCpuFreq, "N/A"));
+        cpuFreq.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallCpuFreq, "N/A"));
+        items.add(cpuFreq);
+
+        // /etc/hosts Hash
+        FingerprintItem hostsHash = new FingerprintItem("hosts_hash", "Hosts Hash");
+        String javaHostsHash = computeHostsHashJava();
+        String nativeHostsHash = nativeDetector.getHostsHashNative();
+        String syscallHostsHash = nativeDetector.getHostsHashSyscall();
+        hostsHash.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaHostsHash, "N/A"));
+        hostsHash.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeHostsHash, "N/A"));
+        hostsHash.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallHostsHash, "N/A"));
+        items.add(hostsHash);
+
+        // SELinux State
+        FingerprintItem selinux = new FingerprintItem("selinux", "SELinux 状态");
+        String javaSelinux = collectSELinuxJava();
+        String nativeSelinux = nativeDetector.getSELinuxFingerprintNative();
+        String syscallSelinux = nativeDetector.getSELinuxFingerprintSyscall();
+        selinux.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaSelinux, "N/A"));
+        selinux.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeSelinux, "N/A"));
+        selinux.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallSelinux, "N/A"));
+        items.add(selinux);
+
+        // Process Package Name (/proc/self/cmdline)
+        FingerprintItem procName = new FingerprintItem("proc_name", "进程包名");
+        String javaProcName = requireContext().getPackageName();
+        String nativeProcName = nativeDetector.getCmdlineNative();
+        String syscallProcName = nativeDetector.getCmdlineSyscall();
+        procName.setLayerValue(DetectionLayer.JAVA, nonEmpty(javaProcName, "N/A"));
+        procName.setLayerValue(DetectionLayer.NATIVE, nonEmpty(nativeProcName, "N/A"));
+        procName.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(syscallProcName, "N/A"));
+        items.add(procName);
+
         result.setItems(items);
+
+        // ==================== Runtime Integrity Indicators ====================
+
+        // RWX anonymous memory detection
+        int rwxCount = nativeDetector.countAnonymousRwxMemory();
+        int rwxPenalty = 0;
+        if (rwxCount >= 3) rwxPenalty = 25;
+        else if (rwxCount >= 1) rwxPenalty = 10;
+        result.setRwxPenalty(rwxPenalty);
+
+        // /dev/urandom integrity
+        int urandomPenalty = 0;
+        if (nativeDetector.checkUrandomIntegrity()) {
+            urandomPenalty = 20;
+        }
+        result.setUrandomPenalty(urandomPenalty);
+
+        // Property mmap vs native consistency
+        int mmapMismatch = nativeDetector.checkPropertyMmapConsistency();
+        int mmapPenalty = (mmapMismatch > 0) ? 20 : 0;
+        result.setMmapPenalty(mmapPenalty);
+
         result.calculateTrustLevel();
         result.generateCompositeFingerprint();
 
-        // Generate hardware and software hashes using reflection values
-        // Include DRM ID as it's a hardware-bound identifier
+        // Generate hardware and software hashes
         String hwString = nonEmpty(reflectBrand) + nonEmpty(reflectModel) + nonEmpty(reflectDevice) +
                 nonEmpty(reflectHw) + nonEmpty(reflectBoard) + nonEmpty(nativeCpuSerial, javaCpuSerial) +
                 nonEmpty(nativeSocSerial, javaSocSerial) + nonEmpty(nativeBootSerial, javaBootSerial) +
-                nonEmpty(javaDrmId);
+                nonEmpty(javaDrmId) + nonEmpty(javaManufacturer) + nonEmpty(javaMac, fileMac) +
+                nonEmpty(javaScreen) + nonEmpty(javaTotalRam) + nonEmpty(javaAbi, propAbi) +
+                nonEmpty(javaStorage) + nonEmpty(syscallCpuFreq, nativeCpuFreq);
         result.setHardwareHash(sha256(hwString));
 
         String swString = nonEmpty(reflectFp) + nonEmpty(reflectId) +
                 ReflectionUtils.getBuildVersionField("RELEASE") +
                 ReflectionUtils.getBuildVersionField("SDK_INT") +
                 nonEmpty(nativeBootId, javaBootId) + nonEmpty(nativeVbmeta, propVbmeta) +
-                nonEmpty(reflectBootloader);
+                nonEmpty(reflectBootloader) + nonEmpty(reflectRelease) + nonEmpty(reflectSdk) +
+                nonEmpty(reflectPatch) + nonEmpty(reflectType, propType) +
+                nonEmpty(reflectTags, propTags) + nonEmpty(javaTimezone, propTimezone) +
+                nonEmpty(javaLanguage) + nonEmpty(syscallSelinux, nativeSelinux) +
+                nonEmpty(syscallHostsHash, nativeHostsHash);
         result.setSoftwareHash(sha256(swString));
 
+        // ==================== Persistent Fingerprint ====================
+        try {
+            String currentHwHash = result.getHardwareHash();
+            if (PersistentFingerprint.exists()) {
+                PersistentFingerprint.PersistentData pData =
+                        PersistentFingerprint.load(currentHwHash);
+                if (pData != null && pData.deviceChanged) {
+                    result.setPersistentPenalty(15);
+                    result.calculateTrustLevel();
+                }
+                if (pData != null) {
+                    PersistentFingerprint.save(pData.token, currentHwHash);
+                }
+            } else {
+                String token = PersistentFingerprint.generateToken();
+                PersistentFingerprint.save(token, currentHwHash);
+            }
+        } catch (Exception e) {
+            // Storage permission may not be granted — non-fatal
+        }
+
         return result;
+    }
+
+    /**
+     * Collect CPU max frequency pattern via Java file reading.
+     */
+    private String collectCpuFreqJava() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 16; i++) {
+            String freq = ReflectionUtils.readFileFirstLine(
+                    "/sys/devices/system/cpu/cpu" + i + "/cpufreq/cpuinfo_max_freq");
+            if (freq == null || freq.isEmpty()) break;
+            if (sb.length() > 0) sb.append(",");
+            sb.append(freq.trim());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Compute /etc/hosts hash via Java.
+     */
+    private String computeHostsHashJava() {
+        String content = ReflectionUtils.readFile("/etc/hosts");
+        if (content.isEmpty()) {
+            content = ReflectionUtils.readFile("/system/etc/hosts");
+        }
+        if (content.isEmpty()) return "";
+        return ReflectionUtils.djb2Hash(content);
+    }
+
+    /**
+     * Collect SELinux fingerprint via Java.
+     * Format: "Enforcing|u:r:untrusted_app"
+     */
+    private String collectSELinuxJava() {
+        String enforce = ReflectionUtils.readFileFirstLine("/sys/fs/selinux/enforce");
+        String state = "1".equals(enforce) ? "Enforcing" : "Permissive";
+
+        String context = ReflectionUtils.readFileFirstLine("/proc/self/attr/current");
+        if (context != null && !context.isEmpty()) {
+            // Truncate at 3rd colon: "u:r:untrusted_app:s0:c512" -> "u:r:untrusted_app"
+            int colonCount = 0;
+            for (int i = 0; i < context.length(); i++) {
+                if (context.charAt(i) == ':') {
+                    colonCount++;
+                    if (colonCount == 3) {
+                        context = context.substring(0, i);
+                        break;
+                    }
+                }
+            }
+        } else {
+            context = "unknown";
+        }
+        return state + "|" + context;
+    }
+
+    /**
+     * Round RAM value string (e.g. "7890 MB") to nearest 128MB boundary for cross-layer consistency.
+     * sysconf, /proc/meminfo and ActivityManager report slightly different totals.
+     */
+    private String roundRamValue(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        try {
+            // Extract numeric part - Native returns "XXXX MB"
+            String num = raw.replaceAll("[^0-9]", "");
+            if (num.isEmpty()) return raw;
+            long mb = Long.parseLong(num);
+            mb = ((mb + 64) / 128) * 128;
+            return mb + " MB";
+        } catch (NumberFormatException e) {
+            return raw;
+        }
     }
 
     /**
@@ -520,19 +952,19 @@ public class FingerprintFragment extends Fragment {
         tvTrustLevel.setText(trustLevel + "%");
         progressTrust.setProgress(trustLevel);
 
-        // Update tampering status
+        // Update tampering status (M3 dot + progress indicator)
         if (result.isTamperingDetected()) {
             tvTamperingStatus.setText(R.string.tampering_detected);
             tvTamperingStatus.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_risk));
-            ivStatusIcon.setImageResource(R.drawable.ic_status_risk);
+            ivStatusIcon.setBackgroundTintList(ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.status_risk)));
             tvTrustLevel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_risk));
-            progressTrust.setProgressTintList(ContextCompat.getColorStateList(requireContext(), R.color.status_risk));
+            progressTrust.setIndicatorColor(ContextCompat.getColor(requireContext(), R.color.status_risk));
         } else {
             tvTamperingStatus.setText(R.string.no_tampering);
             tvTamperingStatus.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_safe));
-            ivStatusIcon.setImageResource(R.drawable.ic_status_safe);
+            ivStatusIcon.setBackgroundTintList(ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.status_safe)));
             tvTrustLevel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_safe));
-            progressTrust.setProgressTintList(ContextCompat.getColorStateList(requireContext(), R.color.status_safe));
+            progressTrust.setIndicatorColor(ContextCompat.getColor(requireContext(), R.color.status_safe));
         }
 
         // Update hashes
@@ -622,11 +1054,13 @@ public class FingerprintFragment extends Fragment {
             holder.tvNativeValue.setText("Native: " + nativeVal);
 
             if (item.isConsistent()) {
-                holder.ivConsistency.setImageResource(R.drawable.ic_status_safe);
+                holder.ivConsistency.setBackgroundTintList(ColorStateList.valueOf(
+                        ContextCompat.getColor(context, R.color.status_safe)));
                 holder.tvConsistency.setText("一致");
                 holder.tvConsistency.setTextColor(ContextCompat.getColor(context, R.color.status_safe));
             } else {
-                holder.ivConsistency.setImageResource(R.drawable.ic_status_risk);
+                holder.ivConsistency.setBackgroundTintList(ColorStateList.valueOf(
+                        ContextCompat.getColor(context, R.color.status_risk)));
                 holder.tvConsistency.setText("不一致");
                 holder.tvConsistency.setTextColor(ContextCompat.getColor(context, R.color.status_risk));
             }
@@ -646,8 +1080,8 @@ public class FingerprintFragment extends Fragment {
 
         static class ViewHolder extends RecyclerView.ViewHolder {
             TextView tvName, tvValue, tvJavaValue, tvNativeValue, tvConsistency;
-            ImageView ivConsistency;
-            ImageButton btnCopy;
+            View ivConsistency;
+            View btnCopy;
 
             ViewHolder(@NonNull View itemView) {
                 super(itemView);
@@ -687,9 +1121,11 @@ public class FingerprintFragment extends Fragment {
             holder.tvSyscall.setText(item.getAbbreviatedValue(DetectionLayer.SYSCALL, 6));
 
             if (item.isConsistent()) {
-                holder.ivStatus.setImageResource(R.drawable.ic_status_safe);
+                holder.ivStatus.setBackgroundTintList(ColorStateList.valueOf(
+                        ContextCompat.getColor(holder.itemView.getContext(), R.color.status_safe)));
             } else {
-                holder.ivStatus.setImageResource(R.drawable.ic_status_risk);
+                holder.ivStatus.setBackgroundTintList(ColorStateList.valueOf(
+                        ContextCompat.getColor(holder.itemView.getContext(), R.color.status_risk)));
             }
         }
 
@@ -700,7 +1136,7 @@ public class FingerprintFragment extends Fragment {
 
         static class ViewHolder extends RecyclerView.ViewHolder {
             TextView tvName, tvJava, tvNative, tvSyscall;
-            ImageView ivStatus;
+            View ivStatus;
 
             ViewHolder(@NonNull View itemView) {
                 super(itemView);
