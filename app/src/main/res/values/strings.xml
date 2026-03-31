@@ -43,9 +43,11 @@
     <string name="category_debug">调试检测</string>
     <string name="category_integrity">完整性检测</string>
     <string name="category_network">网络检测</string>
-    <string name="category_side_channel">侧信道攻击</string>
+    <string name="category_side_channel">运行时完整性</string>
     <string name="category_readlink">符号链接检测</string>
     <string name="category_zygote">Zygote 注入</string>
+    <string name="category_tamper">改机/云控</string>
+    <string name="category_bootloader">Bootloader 解锁</string>
 
     <!-- Zygote Detection Items -->
     <string name="detect_zygisk">Zygisk 注入</string>
@@ -126,6 +128,14 @@
     <string name="build_fingerprint">Build 指纹</string>
     <string name="hardware_fingerprint">硬件指纹 Hash</string>
     <string name="software_fingerprint">软件指纹 Hash</string>
+    <string name="cpu_freq_pattern">CPU 频率指纹</string>
+    <string name="hosts_hash">Hosts Hash</string>
+    <string name="selinux_state">SELinux 状态</string>
+    <string name="process_name">进程包名</string>
+    <string name="persistent_token">持久化 Token</string>
+    <string name="persistent_status_new">新设备</string>
+    <string name="persistent_status_same">设备未变更</string>
+    <string name="persistent_status_changed">设备已变更</string>
 
     <!-- Fingerprint Items - Kernel -->
     <string name="boot_id">Boot ID</string>
@@ -212,6 +222,13 @@
     <string name="about_title">关于</string>
     <string name="version_format">版本 %s</string>
     <string name="author_info">作者信息</string>
+    <string name="about_author">作者</string>
+    <string name="about_wechat">微信</string>
+    <string name="app_slogan">设备环境检测</string>
+    <string name="copyright">Copyright 2025 在座的各位所有大佬</string>
+    <string name="device_identifiers">设备标识符</string>
+    <string name="fingerprint_hashes">指纹哈希</string>
+    <string name="app_version">v1.1.4</string>
     <string name="feature_intro">功能介绍</string>
     <string name="feature_1">设备环境安全检测 (Root/Hook/模拟器/调试)</string>
     <string name="feature_2">设备指纹采集与篡改检测</string>

@@ -386,4 +386,18 @@ public class ReflectionUtils {
         }
         return "";
     }
+
+    /**
+     * Compute djb2 hash of a string.
+     * Used for /etc/hosts fingerprinting.
+     */
+    public static String djb2Hash(String input) {
+        if (input == null || input.isEmpty()) return "";
+        long hash = 5381;
+        for (int i = 0; i < input.length(); i++) {
+            hash = ((hash << 5) + hash) + input.charAt(i);
+            hash &= 0xFFFFFFFFL; // Keep as unsigned 32-bit
+        }
+        return String.format("%08x", hash);
+    }
 }
