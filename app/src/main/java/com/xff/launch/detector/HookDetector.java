@@ -29,6 +29,78 @@ public class HookDetector {
             "org.meowcat.edxposed.manager"
     };
 
+    // SandHook framework signatures (from sgmain heap dump)
+    private static final String[] SANDHOOK_SIGNATURES = {
+            "SandHooker",
+            "SandHookerNew_",
+            "com.swift.sandhook",
+            "libsandhook.edxp.so",
+            "Lcom/swift/sandhook/SandHook;"
+    };
+
+    // Pine Hook framework (LSPosed底层hook引擎)
+    private static final String[] PINE_SIGNATURES = {
+            "libpine.so"
+    };
+
+    // Hook function prefix signatures (from sgmain heap dump)
+    private static final String[] HOOK_FUNC_PREFIXES = {
+            "LspHooker_",
+            "LLSPHooker_",
+            "EdHooker_",
+            "BugHooker_",
+            "ParagonHelpers",
+            "ParagonBridge",
+            "LppiHelpers",
+            "DexposedBridge",
+            "SekiroXposedRequestHandler"
+    };
+
+    // ART internal Xposed symbols (from sgmain heap dump - libart detection)
+    private static final String[] ART_XPOSED_SYMBOLS = {
+            "_ZN3art30InvokeXposedHandleHookedMethod",
+            "_ZN3art9ArtMethod16EnableXposedHook",
+            "_ZNK3art7OatFile11XposedBeginEv"
+    };
+
+    // VirtualXposed paths (from sgmain heap dump)
+    private static final String[] VIRTUAL_XPOSED_PATHS = {
+            "/data/data/io.va.exposed/virtual/data/app/",
+            "/data/data/io.va.exposed/virtual/data/app/fuckcode.xposedtemplete"
+    };
+
+    // Additional Hook framework packages (from sgmain heap dump)
+    private static final String[] ADDITIONAL_HOOK_PACKAGES = {
+            "io.va.exposed",
+            "com.sl.whale",
+            "com.sollyu.xposed.hook.model",
+            "com.rong.xposed.fakelocation",
+            "com.swift.sandhook"
+    };
+
+    // Xposed memory signatures (from sgmain heap dump - /proc/self/maps)
+    private static final String[] XPOSED_MEMORY_SIGNATURES = {
+            "XposedBridge.invokeOriginalMethodNative",
+            "system@framework@XposedBridge.jar@classes.dex",
+            "XposedHelpers.callMethod",
+            "XposedHelpers.callStaticMethod",
+            "XposedInit",
+            "XposedHelpers"
+    };
+
+    // Frida thread names for thread scanning (from sgmain - 401 thread scan)
+    private static final String[] FRIDA_THREAD_NAMES = {
+            "gmain",
+            "gdbus",
+            "gum-js-loop",
+            "pool-frida",
+            "linjector",
+            "frida"
+    };
+
+    // VMOS Xposed property
+    private static final String VMOS_XPOSED_PROP = "persist.vmos.xposed.enable";
+
     public HookDetector(Context context) {
         this.context = context;
         this.nativeDetector = NativeDetector.getInstance();
@@ -732,9 +804,235 @@ public class HookDetector {
         items.add(detectFrida());
         items.add(detectLSPosed());
         items.add(detectZygisk());
-        items.add(detectSmapsHook());  // 添加 SMAPS 内存检测
+        items.add(detectSmapsHook());
         items.add(detectMemoryIntegrity());
+        items.add(detectAdvancedHookFrameworks());
+        items.add(detectFridaThreads());
         return items;
+    }
+
+    /**
+     * Detect advanced hook frameworks: SandHook, Pine, Whale, Dexposed, VirtualXposed
+     * Based on sgmain SecGuard heap dump analysis
+     */
+    public DetectionItem detectAdvancedHookFrameworks() {
+        DetectionItem item = new DetectionItem("高级Hook框架", "检测 SandHook/Pine/Whale/VirtualXposed 等");
+
+        boolean javaDetected = false;
+        boolean nativeDetected = false;
+
+        // Java layer: check packages
+        for (String pkg : ADDITIONAL_HOOK_PACKAGES) {
+            if (isPackageInstalled(pkg)) {
+                javaDetected = true;
+                item.addDetectionDetail("📦 Hook 包名", pkg, "已安装", DetectionLayer.JAVA, "📱");
+            }
+        }
+
+        // Java layer: check stack trace for hook prefixes
+        try {
+            throw new Exception("hook check");
+        } catch (Exception e) {
+            for (StackTraceElement el : e.getStackTrace()) {
+                String cls = el.getClassName();
+                for (String prefix : HOOK_FUNC_PREFIXES) {
+                    if (cls.contains(prefix)) {
+                        javaDetected = true;
+                        item.addDetectionDetail("🔗 Hook 函数", prefix, "类名: " + cls, DetectionLayer.JAVA, "⚡");
+                    }
+                }
+            }
+        }
+
+        // Java layer: check VMOS Xposed property
+        try {
+            String vmosVal = System.getProperty(VMOS_XPOSED_PROP);
+            if (vmosVal != null && !vmosVal.isEmpty()) {
+                javaDetected = true;
+                item.addDetectionDetail("🎮 VMOS Xposed", VMOS_XPOSED_PROP, "值: " + vmosVal, DetectionLayer.JAVA, "📱");
+            }
+        } catch (Exception ignored) {}
+
+        // Java layer: check VirtualXposed paths
+        for (String path : VIRTUAL_XPOSED_PATHS) {
+            if (new File(path).exists()) {
+                javaDetected = true;
+                item.addDetectionDetail("📁 VirtualXposed", path, "文件存在", DetectionLayer.JAVA, "📂");
+            }
+        }
+
+        item.setLayerResult(DetectionLayer.JAVA, javaDetected);
+
+        // Native layer: scan /proc/self/maps for SandHook/Pine/ART Xposed symbols
+        try {
+            BufferedReader reader = new BufferedReader(new FileReader("/proc/self/maps"));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String lower = line.toLowerCase();
+                // SandHook
+                for (String sig : SANDHOOK_SIGNATURES) {
+                    if (lower.contains(sig.toLowerCase())) {
+                        nativeDetected = true;
+                        item.addDetectionDetail("💾 SandHook 内存", sig, "映射: " + line.trim(), DetectionLayer.NATIVE, "🔍");
+                    }
+                }
+                // Pine
+                for (String sig : PINE_SIGNATURES) {
+                    if (lower.contains(sig.toLowerCase())) {
+                        nativeDetected = true;
+                        item.addDetectionDetail("💾 Pine 内存", sig, "映射: " + line.trim(), DetectionLayer.NATIVE, "🔍");
+                    }
+                }
+                // ART Xposed symbols
+                for (String sym : ART_XPOSED_SYMBOLS) {
+                    if (line.contains(sym)) {
+                        nativeDetected = true;
+                        item.addDetectionDetail("🧬 ART Xposed 符号", sym, "映射: " + line.trim(), DetectionLayer.NATIVE, "⚠️");
+                    }
+                }
+            }
+            reader.close();
+        } catch (Exception ignored) {}
+
+        // Native layer: check VirtualXposed paths via native
+        for (String path : VIRTUAL_XPOSED_PATHS) {
+            if (nativeDetector.fileExistsNative(path)) {
+                nativeDetected = true;
+            }
+        }
+
+        item.setLayerResult(DetectionLayer.NATIVE, nativeDetected);
+
+        // Syscall layer
+        boolean syscallDetected = false;
+        for (String path : VIRTUAL_XPOSED_PATHS) {
+            if (nativeDetector.fileExistsSyscall(path)) {
+                syscallDetected = true;
+            }
+        }
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallDetected);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到高级Hook框架");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到");
+        }
+
+        return item;
+    }
+
+    /**
+     * Detect Frida via thread name scanning (sgmain 401-thread scan technique)
+     * Scans /proc/self/task/TID/comm for Frida-specific thread names
+     */
+    public DetectionItem detectFridaThreads() {
+        DetectionItem item = new DetectionItem("Frida 线程扫描", "扫描全部线程检测 Frida 特征线程名");
+
+        boolean detected = false;
+        int totalThreads = 0;
+        int suspiciousThreads = 0;
+
+        try {
+            File taskDir = new File("/proc/self/task");
+            File[] tasks = taskDir.listFiles();
+            if (tasks != null) {
+                totalThreads = tasks.length;
+                for (File task : tasks) {
+                    try {
+                        // Read thread name from comm
+                        File commFile = new File(task, "comm");
+                        if (commFile.exists()) {
+                            BufferedReader reader = new BufferedReader(new FileReader(commFile));
+                            String threadName = reader.readLine();
+                            reader.close();
+
+                            if (threadName != null) {
+                                String lower = threadName.trim().toLowerCase();
+                                for (String fridaName : FRIDA_THREAD_NAMES) {
+                                    if (lower.contains(fridaName.toLowerCase())) {
+                                        detected = true;
+                                        suspiciousThreads++;
+                                        item.addDetectionDetail("🧵 可疑线程", threadName.trim(),
+                                            "TID: " + task.getName() + "\n匹配: " + fridaName,
+                                            DetectionLayer.JAVA, "🔗");
+                                    }
+                                }
+                            }
+                        }
+
+                        // Also check TracerPid in status
+                        File statusFile = new File(task, "status");
+                        if (statusFile.exists()) {
+                            BufferedReader reader = new BufferedReader(new FileReader(statusFile));
+                            String line;
+                            while ((line = reader.readLine()) != null) {
+                                if (line.startsWith("TracerPid:")) {
+                                    String pidStr = line.substring(10).trim();
+                                    int tracerPid = Integer.parseInt(pidStr);
+                                    if (tracerPid > 0) {
+                                        detected = true;
+                                        item.addDetectionDetail("🔍 TracerPid", "线程被追踪",
+                                            "TID: " + task.getName() + "\nTracerPid: " + tracerPid,
+                                            DetectionLayer.JAVA, "⚠️");
+                                    }
+                                    break;
+                                }
+                            }
+                            reader.close();
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // D-Bus protocol detection - send AUTH message to detect Frida
+        boolean dbusDetected = false;
+        int[] checkPorts = {27042, 27043, 27044, 27045};
+        for (int port : checkPorts) {
+            try {
+                java.net.Socket socket = new java.net.Socket();
+                socket.connect(new java.net.InetSocketAddress("127.0.0.1", port), 200);
+                socket.setSoTimeout(200);
+
+                // Send D-Bus AUTH message
+                java.io.OutputStream out = socket.getOutputStream();
+                out.write("\0AUTH\r\n".getBytes());
+                out.flush();
+
+                // Read response - Frida responds with "REJECTED"
+                byte[] buf = new byte[128];
+                int n = socket.getInputStream().read(buf);
+                if (n > 0) {
+                    String response = new String(buf, 0, n);
+                    if (response.contains("REJECT")) {
+                        dbusDetected = true;
+                        detected = true;
+                        item.addDetectionDetail("🌐 D-Bus 协议", "端口 " + port,
+                            "D-Bus AUTH 响应: REJECTED (Frida特征)",
+                            DetectionLayer.JAVA, "🔌");
+                    }
+                }
+                socket.close();
+            } catch (Exception ignored) {}
+        }
+
+        item.setLayerResult(DetectionLayer.JAVA, detected);
+        item.setLayerResult(DetectionLayer.NATIVE, detected);
+        item.setLayerResult(DetectionLayer.SYSCALL, detected);
+
+        if (detected) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail(String.format("扫描 %d 线程, 发现 %d 可疑%s",
+                totalThreads, suspiciousThreads,
+                dbusDetected ? " + D-Bus协议检测" : ""));
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail(String.format("已扫描 %d 线程, 未发现异常", totalThreads));
+        }
+
+        return item;
     }
 
     // ===================== Java Layer Methods =====================

@@ -1,5 +1,7 @@
 package com.xff.launch.adapter;
 
+import android.animation.ValueAnimator;
+import android.content.res.ColorStateList;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -8,6 +10,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
+import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -19,7 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Adapter for detection group cards with expandable items
+ * Adapter for detection group cards with expandable items - M3 style
  */
 public class DetectionGroupAdapter extends RecyclerView.Adapter<DetectionGroupAdapter.GroupViewHolder> {
 
@@ -56,7 +59,8 @@ public class DetectionGroupAdapter extends RecyclerView.Adapter<DetectionGroupAd
     static class GroupViewHolder extends RecyclerView.ViewHolder {
         private final ImageView ivCategoryIcon;
         private final TextView tvCategoryName;
-        private final ImageView ivStatusIcon;
+        private final TextView tvStatusSummary;
+        private final View ivStatusIcon;
         private final ImageView ivExpand;
         private final View divider;
         private final LinearLayout layoutItems;
@@ -67,6 +71,7 @@ public class DetectionGroupAdapter extends RecyclerView.Adapter<DetectionGroupAd
             super(itemView);
             ivCategoryIcon = itemView.findViewById(R.id.iv_category_icon);
             tvCategoryName = itemView.findViewById(R.id.tv_category_name);
+            tvStatusSummary = itemView.findViewById(R.id.tv_status_summary);
             ivStatusIcon = itemView.findViewById(R.id.iv_status_icon);
             ivExpand = itemView.findViewById(R.id.iv_expand);
             divider = itemView.findViewById(R.id.divider);
@@ -79,49 +84,60 @@ public class DetectionGroupAdapter extends RecyclerView.Adapter<DetectionGroupAd
             tvCategoryName.setText(group.getName());
             ivCategoryIcon.setImageResource(group.getIconResId());
 
-            // Set status icon
+            // Status summary (risk/total)
+            int riskCount = group.getRiskCount();
+            int totalCount = group.getItems() != null ? group.getItems().size() : 0;
+            tvStatusSummary.setText(riskCount + "/" + totalCount);
+
+            // Status dot color
             DetectionStatus status = group.getOverallStatus();
+            int dotColor;
             switch (status) {
                 case SAFE:
-                    ivStatusIcon.setImageResource(R.drawable.ic_status_safe);
+                    dotColor = ContextCompat.getColor(itemView.getContext(), R.color.status_safe);
                     break;
                 case RISK:
-                    ivStatusIcon.setImageResource(R.drawable.ic_status_risk);
+                    dotColor = ContextCompat.getColor(itemView.getContext(), R.color.status_risk);
                     break;
                 case WARNING:
-                    ivStatusIcon.setImageResource(R.drawable.ic_status_warning);
+                    dotColor = ContextCompat.getColor(itemView.getContext(), R.color.status_warning);
                     break;
                 default:
-                    ivStatusIcon.setImageResource(R.drawable.ic_status_unknown);
+                    dotColor = ContextCompat.getColor(itemView.getContext(), R.color.status_unknown);
                     break;
             }
+            ivStatusIcon.setBackgroundTintList(ColorStateList.valueOf(dotColor));
 
             // Set expand state
             updateExpandState(group.isExpanded());
 
             // Set up items recycler
             DetectionItemAdapter itemAdapter = new DetectionItemAdapter();
-            itemAdapter.setOnItemClickListener(itemClickListener);  // 设置点击监听器
+            itemAdapter.setOnItemClickListener(itemClickListener);
             recyclerItems.setLayoutManager(new LinearLayoutManager(itemView.getContext()));
             recyclerItems.setAdapter(itemAdapter);
             itemAdapter.setItems(group.getItems());
 
-            // Handle click to expand/collapse
+            // Handle click to expand/collapse with arrow rotation
             layoutHeader.setOnClickListener(v -> {
                 group.toggleExpanded();
                 updateExpandState(group.isExpanded());
+
+                // Animate arrow rotation
+                float targetRotation = group.isExpanded() ? 180f : 0f;
+                ivExpand.animate().rotation(targetRotation).setDuration(300).start();
             });
         }
 
         private void updateExpandState(boolean expanded) {
             if (expanded) {
-                ivExpand.setImageResource(R.drawable.ic_collapse);
                 divider.setVisibility(View.VISIBLE);
                 layoutItems.setVisibility(View.VISIBLE);
+                ivExpand.setRotation(180f);
             } else {
-                ivExpand.setImageResource(R.drawable.ic_expand);
                 divider.setVisibility(View.GONE);
                 layoutItems.setVisibility(View.GONE);
+                ivExpand.setRotation(0f);
             }
         }
     }

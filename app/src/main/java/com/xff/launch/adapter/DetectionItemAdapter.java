@@ -1,12 +1,13 @@
 package com.xff.launch.adapter;
 
+import android.content.res.ColorStateList;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ImageView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
+import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.xff.launch.R;
@@ -17,7 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Adapter for individual detection items
+ * Adapter for individual detection items - M3 style with status dots
  */
 public class DetectionItemAdapter extends RecyclerView.Adapter<DetectionItemAdapter.ItemViewHolder> {
 
@@ -56,7 +57,7 @@ public class DetectionItemAdapter extends RecyclerView.Adapter<DetectionItemAdap
     }
 
     static class ItemViewHolder extends RecyclerView.ViewHolder {
-        private final ImageView ivStatus;
+        private final View ivStatus;
         private final TextView tvName;
         private final TextView tvDetail;
 
@@ -71,31 +72,32 @@ public class DetectionItemAdapter extends RecyclerView.Adapter<DetectionItemAdap
             tvName.setText(item.getName());
             tvDetail.setText(item.getDetail());
 
-            // Set status icon
+            // Set status dot color
             DetectionStatus status = item.getStatus();
+            int dotColor;
             switch (status) {
                 case SAFE:
-                    ivStatus.setImageResource(R.drawable.ic_status_safe);
+                    dotColor = ContextCompat.getColor(itemView.getContext(), R.color.status_safe);
                     break;
                 case RISK:
-                    ivStatus.setImageResource(R.drawable.ic_status_risk);
+                    dotColor = ContextCompat.getColor(itemView.getContext(), R.color.status_risk);
                     break;
                 case WARNING:
-                    ivStatus.setImageResource(R.drawable.ic_status_warning);
+                    dotColor = ContextCompat.getColor(itemView.getContext(), R.color.status_warning);
                     break;
                 default:
-                    ivStatus.setImageResource(R.drawable.ic_status_unknown);
+                    dotColor = ContextCompat.getColor(itemView.getContext(), R.color.status_unknown);
                     break;
             }
+            ivStatus.setBackgroundTintList(ColorStateList.valueOf(dotColor));
 
-            // 设置点击事件 - 只有检测到风险或有详细信息时可点击
+            // Click events
             if (status == DetectionStatus.RISK || status == DetectionStatus.WARNING || item.hasDetails()) {
                 itemView.setOnClickListener(v -> {
                     if (listener != null) {
                         listener.onItemClick(item);
                     }
                 });
-                // 添加点击反馈 - 通过 TypedValue 获取 attribute 的实际 drawable
                 android.util.TypedValue outValue = new android.util.TypedValue();
                 itemView.getContext().getTheme().resolveAttribute(
                     android.R.attr.selectableItemBackground, outValue, true);

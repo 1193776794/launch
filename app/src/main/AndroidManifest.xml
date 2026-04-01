@@ -10,8 +10,9 @@
     <!-- Device info permissions -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
-    <!-- Persistent fingerprint storage (survives uninstall) -->
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- Persistent fingerprint: MediaStore write needs no permission, read after reinstall needs these -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
     <application
         android:allowBackup="true"

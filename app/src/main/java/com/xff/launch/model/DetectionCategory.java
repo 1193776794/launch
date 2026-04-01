@@ -12,5 +12,7 @@ public enum DetectionCategory {
     NETWORK,        // Network security detection
     SIDE_CHANNEL,   // Side-channel attack detection (Spectre/Meltdown/Cache timing)
     READLINK,       // Readlink/symlink detection (proc, fd, mount namespace)
-    ZYGOTE          // Zygote injection detection (Zygisk/Riru/LSPosed)
+    ZYGOTE,         // Zygote injection detection (Zygisk/Riru/LSPosed)
+    TAMPER,         // Tamper/device modification tool detection
+    BOOTLOADER      // Bootloader unlock detection
 }

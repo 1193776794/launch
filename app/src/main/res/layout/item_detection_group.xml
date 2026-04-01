@@ -5,12 +5,15 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:layout_marginBottom="12dp"
-    app:cardCornerRadius="12dp"
-    app:cardElevation="2dp">
+    app:cardBackgroundColor="?attr/colorSurfaceContainerLow"
+    app:cardCornerRadius="16dp"
+    app:cardElevation="0dp"
+    app:strokeWidth="0dp">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:animateLayoutChanges="true"
         android:orientation="vertical">
 
         <!-- Group Header -->
@@ -21,39 +24,54 @@
             android:background="?attr/selectableItemBackground"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:padding="16dp">
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="14dp">
 
+            <!-- Category Icon -->
             <ImageView
                 android:id="@+id/iv_category_icon"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:padding="2dp"
                 android:src="@drawable/ic_root"
-                app:tint="@color/primary" />
+                app:tint="?attr/colorPrimary" />
 
+            <!-- Category Name -->
             <TextView
                 android:id="@+id/tv_category_name"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="12dp"
                 android:layout_weight="1"
-                android:textColor="@color/text_primary"
-                android:textSize="16sp"
-                android:textStyle="bold"
+                android:textAppearance="?attr/textAppearanceTitleMedium"
+                android:textColor="?attr/colorOnSurface"
                 tools:text="Root 检测" />
 
-            <ImageView
-                android:id="@+id/iv_status_icon"
-                android:layout_width="20dp"
-                android:layout_height="20dp"
+            <!-- Status Summary (e.g. "3/5") -->
+            <TextView
+                android:id="@+id/tv_status_summary"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
                 android:layout_marginEnd="8dp"
-                android:src="@drawable/ic_status_safe" />
+                android:textAppearance="?attr/textAppearanceLabelMedium"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                tools:text="3/5" />
 
+            <!-- Status Dot -->
+            <View
+                android:id="@+id/iv_status_icon"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_marginEnd="12dp"
+                android:background="@drawable/status_dot" />
+
+            <!-- Expand Arrow -->
             <ImageView
                 android:id="@+id/iv_expand"
                 android:layout_width="24dp"
                 android:layout_height="24dp"
                 android:src="@drawable/ic_expand"
-                app:tint="@color/text_secondary" />
+                app:tint="?attr/colorOnSurfaceVariant" />
 
         </LinearLayout>
 
@@ -62,7 +80,8 @@
             android:id="@+id/divider"
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="@color/divider"
+            android:layout_marginHorizontal="16dp"
+            android:background="?attr/colorOutlineVariant"
             android:visibility="gone" />
 
         <!-- Expandable Items Container -->
@@ -72,7 +91,8 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:paddingHorizontal="16dp"
-            android:paddingBottom="8dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="12dp"
             android:visibility="gone">
 
             <androidx.recyclerview.widget.RecyclerView

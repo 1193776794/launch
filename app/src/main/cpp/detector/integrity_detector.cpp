@@ -54,12 +54,29 @@ static inline long syscall_wrapper(long number, ...) {
 const char* IntegrityDetector::CRITICAL_LIBC_FUNCTIONS[] = {
     "open", "openat", "read", "write", "access", "faccessat",
     "stat", "fstat", "lstat", "readlink", "fopen", "fread",
-    "__system_property_get", "getprop", nullptr
+    "__system_property_get", "getprop",
+    "dlopen", "dlsym", "dlclose",               // libdl functions (often in libc on newer Android)
+    "connect", "sendto", "recvfrom",             // network functions
+    "mmap", "mprotect", "munmap",                // memory management
+    "ptrace",                                     // anti-debug
+    "kill", "execve", "fork",                    // process control
+    nullptr
 };
 
 const char* IntegrityDetector::CRITICAL_LIBART_FUNCTIONS[] = {
     "_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc", // ArtMethod::Invoke
     "_ZN3art11ClassLinker17RegisterDexFileERKNS_7DexFileE",     // ClassLinker::RegisterDexFile
+    nullptr
+};
+
+// dlopen-related functions: these are the primary targets for SO injection hooking.
+// On Android:
+//   - dlopen/dlsym/dlclose: in libdl.so (or merged into libc.so on Android 12+)
+//   - android_dlopen_ext: in libdl.so
+//   - __loader_android_dlopen_ext / __loader_dlopen: in the dynamic linker (linker64/linker)
+const char* IntegrityDetector::CRITICAL_DLOPEN_FUNCTIONS[] = {
+    "dlopen", "dlsym", "dlclose", "android_dlopen_ext",
+    "__loader_dlopen", "__loader_android_dlopen_ext",
     nullptr
 };
 
@@ -125,18 +142,17 @@ uintptr_t IntegrityDetector::findLibraryBase(const std::string& lib_name) {
         return 0;
     }
 
+    // Find the FIRST mapping of this library — this is the load base address.
+    // On Android, the first mapping is typically r--p (ELF headers + read-only data),
+    // followed by r-xp (.text), then rw-p (.data/.bss).
+    // The load base is the start address of the first mapping.
     std::string line;
     while (std::getline(maps, line)) {
-        if (line.find(lib_name) != std::string::npos) {
-            // Parse address range: "70a1f3d000-70a1f45000 r-xp ..."
+        if (line.find(lib_name) != std::string::npos && line.find(".so") != std::string::npos) {
             uintptr_t start;
             if (sscanf(line.c_str(), "%lx", &start) == 1) {
-                // Check if this is executable segment
-                if (line.find(" r-xp ") != std::string::npos ||
-                    line.find(" r--p ") != std::string::npos) {
-                    LOGD("Found %s at base: 0x%lx", lib_name.c_str(), start);
-                    return start;
-                }
+                LOGD("Found %s load base: 0x%lx (from: %s)", lib_name.c_str(), start, line.c_str());
+                return start;
             }
         }
     }
@@ -219,7 +235,8 @@ std::vector<uint8_t> IntegrityDetector::readLibraryFile(const std::string& path)
 
 bool IntegrityDetector::parseElfAndFindTextSection(const std::vector<uint8_t>& elf_data,
                                                    size_t& text_offset,
-                                                   size_t& text_size) {
+                                                   size_t& text_size,
+                                                   size_t& text_vaddr) {
     if (elf_data.size() < sizeof(Elf64_Ehdr)) {
         LOGE("ELF data too small");
         return false;
@@ -261,8 +278,9 @@ bool IntegrityDetector::parseElfAndFindTextSection(const std::vector<uint8_t>& e
                 if (strcmp(section_name, ".text") == 0) {
                     text_offset = shdr->sh_offset;
                     text_size = shdr->sh_size;
-                    LOGD("Found .text section: offset=0x%zx, size=0x%zx",
-                         text_offset, text_size);
+                    text_vaddr = shdr->sh_addr;
+                    LOGD("Found .text section: offset=0x%zx, size=0x%zx, vaddr=0x%zx",
+                         text_offset, text_size, text_vaddr);
                     return true;
                 }
             }
@@ -291,8 +309,9 @@ bool IntegrityDetector::parseElfAndFindTextSection(const std::vector<uint8_t>& e
                 if (strcmp(section_name, ".text") == 0) {
                     text_offset = shdr->sh_offset;
                     text_size = shdr->sh_size;
-                    LOGD("Found .text section (32-bit): offset=0x%zx, size=0x%zx",
-                         text_offset, text_size);
+                    text_vaddr = shdr->sh_addr;
+                    LOGD("Found .text section (32-bit): offset=0x%zx, size=0x%zx, vaddr=0x%zx",
+                         text_offset, text_size, text_vaddr);
                     return true;
                 }
             }
@@ -306,52 +325,129 @@ bool IntegrityDetector::parseElfAndFindTextSection(const std::vector<uint8_t>& e
 bool IntegrityDetector::compareTextSections(uintptr_t mem_base,
                                            const std::vector<uint8_t>& disk_data,
                                            size_t text_offset,
-                                           size_t text_size) {
+                                           size_t text_size,
+                                           size_t text_vaddr) {
     if (text_offset + text_size > disk_data.size()) {
-        LOGE("Invalid .text section bounds");
+        LOGE("Invalid .text section bounds: offset=0x%zx size=0x%zx file=0x%zx",
+             text_offset, text_size, disk_data.size());
         return false;
     }
 
-    // Sample comparison - check first 4KB and last 4KB of .text
-    // Full comparison would be too slow for large libraries
+    // Memory address of .text = library load base + section virtual address (sh_addr).
+    // mem_base is the address of the library's first mapping in /proc/self/maps.
+    // For position-independent shared libraries on Android, the first PT_LOAD segment
+    // usually has p_vaddr=0, so mem_base + sh_addr gives the correct address.
+    // If p_vaddr != 0, we need to subtract it, but this is rare for Android .so files.
+    uintptr_t mem_text_addr = mem_base + text_vaddr;
+
+    LOGD("compareTextSections: mem_base=0x%lx + text_vaddr=0x%zx = mem_text=0x%lx, text_size=0x%zx",
+         mem_base, text_vaddr, mem_text_addr, text_size);
+
+    // Validate the memory address is readable before accessing it.
+    // Use mincore() or simply try to read via /proc/self/mem to avoid SIGSEGV.
+    // Safest approach: read through /proc/self/mem which returns error instead of crashing.
+    int mem_fd = syscall_wrapper(__NR_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY);
+    if (mem_fd < 0) {
+        LOGW("Cannot open /proc/self/mem, skipping comparison");
+        return false;
+    }
+
+    // Read a small sample from memory through /proc/self/mem (safe, no SIGSEGV)
     const size_t SAMPLE_SIZE = 4096;
-    size_t samples_to_check = std::min(text_size, SAMPLE_SIZE * 2);
+    size_t check_size = std::min(SAMPLE_SIZE, text_size);
+    std::vector<uint8_t> mem_sample(check_size);
 
+    // Seek to the memory address
+    off_t seek_result = lseek(mem_fd, (off_t)mem_text_addr, SEEK_SET);
+    if (seek_result < 0 || (uintptr_t)seek_result != mem_text_addr) {
+        LOGW("Cannot seek to 0x%lx in /proc/self/mem (errno=%d), skipping", mem_text_addr, errno);
+        syscall_wrapper(__NR_close, mem_fd);
+        return false;
+    }
+
+    ssize_t bytes_read = syscall_wrapper(__NR_read, mem_fd, mem_sample.data(), check_size);
+    syscall_wrapper(__NR_close, mem_fd);
+
+    if (bytes_read <= 0) {
+        LOGW("Cannot read memory at 0x%lx (read=%zd, errno=%d), skipping", mem_text_addr, bytes_read, errno);
+        return false;
+    }
+
+    // Compare the beginning of .text
     const uint8_t* disk_text = disk_data.data() + text_offset;
-    const uint8_t* mem_text = reinterpret_cast<const uint8_t*>(mem_base + text_offset);
-
     int diff_count = 0;
-    int total_checked = 0;
+    int total_checked = (int)bytes_read;
 
-    // Check beginning
-    for (size_t i = 0; i < std::min(SAMPLE_SIZE, text_size); i++) {
-        total_checked++;
-        if (mem_text[i] != disk_text[i]) {
+    for (int i = 0; i < total_checked; i++) {
+        if (mem_sample[i] != disk_text[i]) {
             diff_count++;
             if (diff_count == 1) {
-                LOGD("First diff at offset +0x%zx: mem=0x%02x disk=0x%02x",
-                     i, mem_text[i], disk_text[i]);
+                LOGD("First diff at .text+0x%x: mem=0x%02x disk=0x%02x",
+                     i, mem_sample[i], disk_text[i]);
             }
         }
     }
 
-    // Check end
-    if (text_size > SAMPLE_SIZE) {
-        size_t end_offset = text_size - SAMPLE_SIZE;
-        for (size_t i = 0; i < SAMPLE_SIZE; i++) {
-            total_checked++;
-            if (mem_text[end_offset + i] != disk_text[end_offset + i]) {
-                diff_count++;
-            }
-        }
-    }
+    if (total_checked == 0) return false;
 
     float diff_rate = (float)diff_count / total_checked;
-    LOGD("Comparison result: %d/%d bytes differ (%.2f%%)",
-         diff_count, total_checked, diff_rate * 100);
+    LOGD("Comparison: %d/%d bytes differ (%.2f%%) at mem=0x%lx",
+         diff_count, total_checked, diff_rate * 100, mem_text_addr);
 
-    // Threshold: >1% difference indicates potential hook
+    // Threshold: >1% difference indicates potential hook.
+    // Normal relocations don't modify .text (they modify .got/.data).
+    // Even a single byte difference in .text is suspicious, but we use 1% to
+    // tolerate edge cases like text relocations on older Android versions.
     return diff_rate > 0.01f;
+}
+
+/**
+ * Cached known library address ranges to avoid re-reading /proc/self/maps per call.
+ */
+struct MappedRegion {
+    uintptr_t start;
+    uintptr_t end;
+};
+
+static std::vector<MappedRegion> s_known_regions;
+static bool s_regions_loaded = false;
+
+static void loadKnownRegions() {
+    if (s_regions_loaded) return;
+    s_regions_loaded = true;
+    s_known_regions.clear();
+
+    std::ifstream maps("/proc/self/maps");
+    if (!maps.is_open()) return;
+
+    std::string line;
+    while (std::getline(maps, line)) {
+        if (line.empty()) continue;
+        // Only include file-backed mappings (path starts with '/')
+        size_t lastSpace = line.rfind(' ');
+        if (lastSpace == std::string::npos) continue;
+        std::string path = line.substr(lastSpace + 1);
+        if (path.empty() || path[0] != '/') continue;
+
+        uintptr_t start, end;
+        if (sscanf(line.c_str(), "%lx-%lx", &start, &end) == 2) {
+            s_known_regions.push_back({start, end});
+        }
+    }
+    LOGD("Loaded %zu known library regions from /proc/self/maps", s_known_regions.size());
+}
+
+/**
+ * Check if an address falls within any known SO mapping (non-anonymous).
+ * Uses cached maps data for performance.
+ */
+static bool isAddressInKnownLibrary(uintptr_t addr) {
+    if (addr == 0) return false;
+    loadKnownRegions();
+    for (const auto& r : s_known_regions) {
+        if (addr >= r.start && addr < r.end) return true;
+    }
+    return false;
 }
 
 bool IntegrityDetector::checkInlineHook(uintptr_t func_addr) {
@@ -359,61 +455,133 @@ bool IntegrityDetector::checkInlineHook(uintptr_t func_addr) {
 
     const uint32_t* instructions = reinterpret_cast<const uint32_t*>(func_addr);
 
-    // Check first 4 instructions for common hook patterns
+    // Detect hook trampoline patterns, then VERIFY the jump target.
+    // Android libdl.so uses LDR X16+BR X16 stubs to forward to the linker — these are normal.
+    // Frida/Dobby/ShadowHook use the same pattern but jump to anonymous mmap memory.
+    // Key distinction: if target is in a known SO → system stub; if in anon memory → hook.
 
 #if defined(__aarch64__)
-    // ARM64 hook patterns
-    for (int i = 0; i < 4; i++) {
-        uint32_t instr = instructions[i];
+    uint32_t instr0 = instructions[0];
+    uint32_t instr1 = instructions[1];
 
-        // Check for B (unconditional branch): 000101xx xxxxxxxx xxxxxxxx xxxxxxxx
-        if ((instr & 0xFC000000) == 0x14000000) {
-            LOGW("Inline hook detected at 0x%lx: B instruction at +%d", func_addr, i * 4);
-            return true;
-        }
+    // Pattern 1: LDR Xn, #offset; BR Xn
+    if ((instr0 & 0xFF000000) == 0x58000000) { // LDR Xn, #literal
+        int rd = instr0 & 0x1F;
+        if ((instr1 & 0xFFFFFC1F) == 0xD61F0000) { // BR Xn
+            int rn = (instr1 >> 5) & 0x1F;
+            if (rd == rn) {
+                // Decode the jump target address from the LDR literal
+                // LDR Xn, #imm19 — offset = SignExtend(imm19 << 2, 64)
+                int32_t imm19 = (int32_t)(instr0 << 8) >> 13;  // sign-extend bits [23:5]
+                int64_t offset = (int64_t)imm19 << 2;
+                uintptr_t literal_addr = func_addr + offset;
 
-        // Check for BL (branch with link): 100101xx xxxxxxxx xxxxxxxx xxxxxxxx
-        if ((instr & 0xFC000000) == 0x94000000) {
-            LOGW("Inline hook detected at 0x%lx: BL instruction at +%d", func_addr, i * 4);
-            return true;
-        }
+                // Read the target pointer from the literal pool
+                uintptr_t target = 0;
+                // Safe read via /proc/self/mem
+                int fd = open("/proc/self/mem", O_RDONLY);
+                if (fd >= 0) {
+                    if (pread(fd, &target, sizeof(target), (off_t)literal_addr) == sizeof(target)) {
+                        // Check if target is in a known library
+                        if (isAddressInKnownLibrary(target)) {
+                            LOGD("LDR+BR at 0x%lx jumps to 0x%lx (known library) — system stub, not hook",
+                                 func_addr, target);
+                            close(fd);
+                            return false;  // Normal system PLT stub
+                        } else {
+                            LOGW("Inline hook at 0x%lx: LDR X%d+BR X%d → target 0x%lx (anonymous memory!)",
+                                 func_addr, rd, rn, target);
+                            close(fd);
+                            return true;  // Jump to anonymous memory = hook
+                        }
+                    }
+                    close(fd);
+                }
 
-        // Check for BR (branch to register): 11010110 00011111 000000xx xxx00000
-        if ((instr & 0xFFFFFC1F) == 0xD61F0000) {
-            LOGW("Inline hook detected at 0x%lx: BR instruction at +%d", func_addr, i * 4);
-            return true;
-        }
-
-        // Check for LDR + BR combo (common trampoline)
-        if ((instr & 0xFF000000) == 0x58000000) { // LDR (literal)
-            uint32_t next_instr = instructions[i + 1];
-            if ((next_instr & 0xFFFFFC1F) == 0xD61F0000) { // BR
-                LOGW("Inline hook detected at 0x%lx: LDR+BR combo at +%d", func_addr, i * 4);
+                // If we can't read the target, report as suspicious
+                LOGW("Inline hook at 0x%lx: LDR X%d+BR X%d (unable to verify target)", func_addr, rd, rn);
                 return true;
             }
         }
     }
+
+    // Pattern 2: MOV X16/X17, #imm16; MOVK X16/X17, #imm16, LSL#16; ... BR X16/X17
+    if ((instr0 & 0xFFE0001F) == 0xD2800010 || // MOV X16, #imm
+        (instr0 & 0xFFE0001F) == 0xD2800011) { // MOV X17, #imm
+        int target_reg = instr0 & 0x1F;
+        if ((instr1 & 0xFFE0001F) == (0xF2A00000 | target_reg)) { // MOVK Xn, #imm, LSL#16
+            // Decode the full immediate to get target address
+            uint64_t imm16_0 = (instr0 >> 5) & 0xFFFF;
+            uint64_t imm16_1 = (instr1 >> 5) & 0xFFFF;
+            uintptr_t target = imm16_0 | (imm16_1 << 16);
+
+            // Check for more MOVK instructions to build full 64-bit address
+            for (int i = 2; i < 4; i++) {
+                uint32_t next = instructions[i];
+                if ((next & 0xFFE0001F) == (0xF2C00000 | target_reg)) { // MOVK LSL#32
+                    target |= ((uint64_t)((next >> 5) & 0xFFFF)) << 32;
+                } else if ((next & 0xFFE0001F) == (0xF2E00000 | target_reg)) { // MOVK LSL#48
+                    target |= ((uint64_t)((next >> 5) & 0xFFFF)) << 48;
+                }
+            }
+
+            if (target != 0 && !isAddressInKnownLibrary(target)) {
+                LOGW("Inline hook at 0x%lx: MOV+MOVK+BR X%d → target 0x%lx (anonymous memory!)",
+                     func_addr, target_reg, target);
+                return true;
+            }
+            // Target in known library = normal, not a hook
+            LOGD("MOV+MOVK+BR at 0x%lx → 0x%lx (known library), not hook", func_addr, target);
+            return false;
+        }
+    }
+
 #elif defined(__arm__)
-    // ARM32 hook patterns
-    for (int i = 0; i < 4; i++) {
-        uint32_t instr = instructions[i];
+    uint32_t instr0 = instructions[0];
+    uint32_t instr1 = instructions[1];
 
-        // Check for B: 1010xxxx xxxxxxxx xxxxxxxx xxxxxxxx
-        if ((instr & 0x0F000000) == 0x0A000000) {
-            LOGW("Inline hook detected at 0x%lx: B instruction at +%d", func_addr, i * 4);
-            return true;
+    // LDR PC, [PC, #n]: direct PC load
+    if ((instr0 & 0x0F7FF000) == 0x051FF000) {
+        // Decode offset and read target
+        int32_t offset = instr0 & 0xFFF;
+        if (!(instr0 & (1 << 23))) offset = -offset;  // U bit
+        uintptr_t target_ptr = func_addr + 8 + offset;  // PC+8 in ARM mode
+        uintptr_t target = 0;
+        int fd = open("/proc/self/mem", O_RDONLY);
+        if (fd >= 0) {
+            if (pread(fd, &target, 4, (off_t)target_ptr) == 4) {
+                close(fd);
+                if (isAddressInKnownLibrary(target)) return false;  // Normal
+                LOGW("Inline hook at 0x%lx: LDR PC → 0x%lx (anonymous)", func_addr, target);
+                return true;
+            }
+            close(fd);
         }
+        return true;  // Can't verify, report suspicious
+    }
 
-        // Check for BL: 1011xxxx xxxxxxxx xxxxxxxx xxxxxxxx
-        if ((instr & 0x0F000000) == 0x0B000000) {
-            LOGW("Inline hook detected at 0x%lx: BL instruction at +%d", func_addr, i * 4);
-            return true;
-        }
-
-        // Check for BX: xxxx0001 0010xxxx xxxx0001 xxxx0000
-        if ((instr & 0x0FFFFFF0) == 0x012FFF10) {
-            LOGW("Inline hook detected at 0x%lx: BX instruction at +%d", func_addr, i * 4);
-            return true;
+    // LDR Rn, [PC, #off]; BX Rn
+    if ((instr0 & 0x0F7F0000) == 0x051F0000) {
+        int rd = (instr0 >> 12) & 0xF;
+        if ((instr1 & 0x0FFFFFF0) == 0x012FFF10) {
+            int rm = instr1 & 0xF;
+            if (rd == rm && rd != 14) {
+                int32_t offset = instr0 & 0xFFF;
+                if (!(instr0 & (1 << 23))) offset = -offset;
+                uintptr_t target_ptr = func_addr + 8 + offset;
+                uintptr_t target = 0;
+                int fd = open("/proc/self/mem", O_RDONLY);
+                if (fd >= 0) {
+                    if (pread(fd, &target, 4, (off_t)target_ptr) == 4) {
+                        close(fd);
+                        if (isAddressInKnownLibrary(target)) return false;
+                        LOGW("Inline hook at 0x%lx: LDR+BX → 0x%lx (anonymous)", func_addr, target);
+                        return true;
+                    }
+                    close(fd);
+                }
+                return true;
+            }
         }
     }
 #endif
@@ -446,14 +614,14 @@ bool IntegrityDetector::checkLibraryIntegrity(const char* lib_name) {
     }
 
     // Parse ELF and find .text section
-    size_t text_offset, text_size;
-    if (!parseElfAndFindTextSection(disk_data, text_offset, text_size)) {
+    size_t text_offset, text_size, text_vaddr;
+    if (!parseElfAndFindTextSection(disk_data, text_offset, text_size, text_vaddr)) {
         LOGW("Failed to parse ELF or find .text section");
         return true; // Can't verify
     }
 
     // Compare memory and disk .text sections
-    bool is_hooked = compareTextSections(base_addr, disk_data, text_offset, text_size);
+    bool is_hooked = compareTextSections(base_addr, disk_data, text_offset, text_size, text_vaddr);
 
     if (is_hooked) {
         LOGW("!!! INTEGRITY VIOLATION DETECTED in %s !!!", lib_name);
@@ -487,10 +655,13 @@ bool IntegrityDetector::checkFunctionHook(const char* lib_name, const char* func
 bool IntegrityDetector::checkLibcIntegrity() {
     LOGD("=== Checking libc.so integrity ===");
 
-    // Method 1: Check library file integrity
+    // Reset cached maps for this detection round
+    s_regions_loaded = false;
+
+    // Method 1: Check library file integrity (.text section disk vs memory)
     bool lib_integrity = checkLibraryIntegrity("libc.so");
 
-    // Method 2: Check critical functions for inline hooks
+    // Method 2: Check critical functions for inline hooks via dlsym
     int hooked_functions = 0;
     for (int i = 0; CRITICAL_LIBC_FUNCTIONS[i] != nullptr; i++) {
         if (checkFunctionHook("libc.so", CRITICAL_LIBC_FUNCTIONS[i])) {
@@ -498,6 +669,27 @@ bool IntegrityDetector::checkLibcIntegrity() {
             hooked_functions++;
         }
     }
+
+    // Method 3: Check dlopen-related functions across multiple libraries
+    // These functions may live in libc.so, libdl.so, or the linker depending on Android version.
+    // Try each library that might contain them.
+    const char* dlopen_libs[] = {"libdl.so", "libc.so", nullptr};
+    for (int li = 0; dlopen_libs[li] != nullptr; li++) {
+        for (int fi = 0; CRITICAL_DLOPEN_FUNCTIONS[fi] != nullptr; fi++) {
+            // Skip __loader_* functions - they're in the linker, not accessible via dlsym
+            if (strncmp(CRITICAL_DLOPEN_FUNCTIONS[fi], "__loader_", 9) == 0) continue;
+
+            if (checkFunctionHook(dlopen_libs[li], CRITICAL_DLOPEN_FUNCTIONS[fi])) {
+                LOGW("dlopen function %s in %s appears to be hooked!",
+                     CRITICAL_DLOPEN_FUNCTIONS[fi], dlopen_libs[li]);
+                hooked_functions++;
+            }
+        }
+    }
+
+    // Method 4: Check __loader_* functions directly from /proc/self/maps + ELF parsing
+    // These are in the dynamic linker (linker64) and can't be found via dlsym.
+    hooked_functions += checkLinkerFunctions();
 
     bool result = lib_integrity && (hooked_functions == 0);
     LOGD("libc.so integrity check: %s (hooked_functions: %d)",
@@ -516,6 +708,138 @@ bool IntegrityDetector::checkAndroidRuntimeIntegrity() {
     return checkLibraryIntegrity("libandroid_runtime.so");
 }
 
+/**
+ * Check linker functions (__loader_dlopen, __loader_android_dlopen_ext)
+ * by finding their addresses directly from /proc/self/maps + ELF symbol table,
+ * bypassing dlopen/dlsym (which may themselves be hooked).
+ *
+ * @return number of hooked linker functions found
+ */
+int IntegrityDetector::checkLinkerFunctions() {
+    LOGD("=== Checking linker functions ===");
+    int hooked_count = 0;
+
+    // Find the linker in /proc/self/maps
+    std::string linker_path;
+    uintptr_t linker_base = 0;
+
+    std::ifstream maps("/proc/self/maps");
+    if (!maps.is_open()) return 0;
+
+    std::string line;
+    while (std::getline(maps, line)) {
+        // Look for linker64 or linker
+        if ((line.find("/linker64") != std::string::npos ||
+             line.find("/linker") != std::string::npos) &&
+            line.find(".so") == std::string::npos) {  // Exclude liblinker_*.so
+            uintptr_t start;
+            if (sscanf(line.c_str(), "%lx", &start) == 1) {
+                if (linker_base == 0) {
+                    linker_base = start;
+                }
+                // Extract path
+                size_t path_start = line.rfind(' ');
+                if (path_start != std::string::npos) {
+                    std::string path = line.substr(path_start + 1);
+                    if (path[0] == '/' && linker_path.empty()) {
+                        linker_path = path;
+                        LOGD("Found linker: %s at base 0x%lx", linker_path.c_str(), linker_base);
+                    }
+                }
+            }
+        }
+    }
+    maps.close();
+
+    if (linker_path.empty() || linker_base == 0) {
+        LOGW("Linker not found in /proc/self/maps");
+        return 0;
+    }
+
+    // Read linker ELF from disk
+    std::vector<uint8_t> linker_data = readLibraryFile(linker_path);
+    if (linker_data.empty() || linker_data.size() < sizeof(Elf64_Ehdr)) {
+        LOGW("Failed to read linker file");
+        return 0;
+    }
+
+    // Parse ELF to find .dynsym and .dynstr for symbol resolution
+    bool is_64bit = (linker_data[4] == 2);
+    if (!is_64bit) {
+        LOGD("32-bit linker, skipping for now");
+        return 0;
+    }
+
+    const Elf64_Ehdr* ehdr = reinterpret_cast<const Elf64_Ehdr*>(linker_data.data());
+
+    // Find .dynsym and .dynstr sections
+    const Elf64_Shdr* dynsym_shdr = nullptr;
+    const Elf64_Shdr* dynstr_shdr = nullptr;
+
+    // First find section header string table
+    if (ehdr->e_shstrndx >= ehdr->e_shnum) return 0;
+    size_t shstrtab_off = ehdr->e_shoff + ehdr->e_shstrndx * ehdr->e_shentsize;
+    if (shstrtab_off + sizeof(Elf64_Shdr) > linker_data.size()) return 0;
+    const Elf64_Shdr* shstrtab = reinterpret_cast<const Elf64_Shdr*>(
+        linker_data.data() + shstrtab_off);
+
+    for (int i = 0; i < ehdr->e_shnum; i++) {
+        size_t sh_off = ehdr->e_shoff + i * ehdr->e_shentsize;
+        if (sh_off + sizeof(Elf64_Shdr) > linker_data.size()) break;
+        const Elf64_Shdr* shdr = reinterpret_cast<const Elf64_Shdr*>(
+            linker_data.data() + sh_off);
+
+        if (shdr->sh_name >= shstrtab->sh_size) continue;
+        const char* name = reinterpret_cast<const char*>(
+            linker_data.data() + shstrtab->sh_offset + shdr->sh_name);
+
+        if (strcmp(name, ".dynsym") == 0) dynsym_shdr = shdr;
+        if (strcmp(name, ".dynstr") == 0) dynstr_shdr = shdr;
+    }
+
+    if (!dynsym_shdr || !dynstr_shdr) {
+        LOGW("Could not find .dynsym/.dynstr in linker");
+        return 0;
+    }
+
+    // Search for __loader_* symbols
+    const char* target_funcs[] = {
+        "__loader_dlopen",
+        "__loader_android_dlopen_ext",
+        "android_dlopen_ext",
+        nullptr
+    };
+
+    size_t sym_count = dynsym_shdr->sh_size / sizeof(Elf64_Sym);
+    const Elf64_Sym* syms = reinterpret_cast<const Elf64_Sym*>(
+        linker_data.data() + dynsym_shdr->sh_offset);
+
+    for (size_t s = 0; s < sym_count; s++) {
+        if (syms[s].st_name == 0 || syms[s].st_value == 0) continue;
+        if (syms[s].st_name >= dynstr_shdr->sh_size) continue;
+
+        const char* sym_name = reinterpret_cast<const char*>(
+            linker_data.data() + dynstr_shdr->sh_offset + syms[s].st_name);
+
+        for (int t = 0; target_funcs[t] != nullptr; t++) {
+            if (strcmp(sym_name, target_funcs[t]) == 0) {
+                uintptr_t func_addr = linker_base + syms[s].st_value;
+                LOGD("Found %s at 0x%lx (linker_base=0x%lx + sym_value=0x%lx)",
+                     sym_name, func_addr, linker_base, (unsigned long)syms[s].st_value);
+
+                if (checkInlineHook(func_addr)) {
+                    LOGW("!!! Linker function %s at 0x%lx is HOOKED !!!", sym_name, func_addr);
+                    hooked_count++;
+                }
+                break;
+            }
+        }
+    }
+
+    LOGD("Linker function check complete: %d hooked", hooked_count);
+    return hooked_count;
+}
+
 IntegrityDetector::IntegrityResult IntegrityDetector::checkAllSystemLibraries() {
     LOGD("=== Starting comprehensive system library integrity check ===");
 
@@ -527,6 +851,7 @@ IntegrityDetector::IntegrityResult IntegrityDetector::checkAllSystemLibraries() 
     // List of critical libraries to check
     const char* critical_libs[] = {
         "libc.so",
+        "libdl.so",
         "libart.so",
         "libandroid_runtime.so",
         "libutils.so",

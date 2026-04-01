@@ -16,9 +16,4 @@
         android:icon="@drawable/ic_phone"
         android:title="@string/nav_device_info" />
 
-    <item
-        android:id="@+id/navigation_about"
-        android:icon="@drawable/ic_info"
-        android:title="@string/nav_about" />
-
 </menu>

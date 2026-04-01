@@ -5,36 +5,35 @@
     android:layout_height="wrap_content"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingVertical="8dp">
+    android:paddingVertical="10dp">
 
     <TextView
         android:id="@+id/tv_property"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_weight="1"
-        android:textColor="@color/text_primary"
-        android:textSize="12sp"
         android:ellipsize="middle"
         android:singleLine="true"
+        android:textAppearance="?attr/textAppearanceBodySmall"
+        android:textColor="?attr/colorOnSurface"
         tools:text="ro.miui.ui.version.name" />
 
-    <ImageView
+    <View
         android:id="@+id/iv_status"
-        android:layout_width="16dp"
-        android:layout_height="16dp"
-        android:layout_marginStart="8dp"
-        android:layout_marginEnd="4dp"
-        android:src="@drawable/ic_status_safe" />
+        android:layout_width="6dp"
+        android:layout_height="6dp"
+        android:layout_marginHorizontal="8dp"
+        android:background="@drawable/status_dot" />
 
     <TextView
         android:id="@+id/tv_value"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:maxWidth="120dp"
         android:ellipsize="end"
+        android:maxWidth="120dp"
         android:singleLine="true"
+        android:textAppearance="?attr/textAppearanceLabelMedium"
         android:textColor="@color/status_safe"
-        android:textSize="12sp"
         tools:text="V14" />
 
 </LinearLayout>

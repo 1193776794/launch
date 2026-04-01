@@ -17,10 +17,8 @@ import android.os.StatFs;
 import android.telephony.TelephonyManager;
 import android.util.DisplayMetrics;
 import android.view.LayoutInflater;
-import android.widget.ImageView;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -31,6 +29,8 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
+import com.google.android.material.chip.Chip;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.xff.launch.R;
 import com.xff.launch.detector.DeviceLegitimacyDetector;
 import com.xff.launch.detector.NativeDetector;
@@ -58,8 +58,8 @@ public class DeviceInfoFragment extends Fragment {
     private SwipeRefreshLayout swipeRefresh;
     private TextView tvLegitimacyScore;
     private TextView tvLegitimacyStatus;
-    private ProgressBar progressLegitimacy;
-    private TextView tvCheckBuild, tvCheckRom, tvCheckService, tvCheckHardware, tvCheckFingerprint;
+    private LinearProgressIndicator progressLegitimacy;
+    private Chip tvCheckBuild, tvCheckRom, tvCheckService, tvCheckHardware, tvCheckFingerprint;
 
     // Basic info
     private View rowBrand, rowModel, rowManufacturer, rowDevice, rowBoard;
@@ -135,15 +135,20 @@ public class DeviceInfoFragment extends Fragment {
         if (executor == null) {
             executor = Executors.newSingleThreadExecutor();
         }
+        if (!isAdded()) return;
+
+        // Cache context on main thread before background work
+        final Context ctx = requireContext().getApplicationContext();
 
         swipeRefresh.setRefreshing(true);
 
         executor.execute(() -> {
-            DeviceInfo info = collectDeviceInfo();
+            DeviceInfo info = collectDeviceInfo(ctx);
             DeviceLegitimacyResult legitimacy = checkLegitimacy(info);
 
-            if (getActivity() != null) {
+            if (getActivity() != null && isAdded()) {
                 getActivity().runOnUiThread(() -> {
+                    if (!isAdded()) return;
                     updateUI(info, legitimacy);
                     swipeRefresh.setRefreshing(false);
                 });
@@ -151,7 +156,7 @@ public class DeviceInfoFragment extends Fragment {
         });
     }
 
-    private DeviceInfo collectDeviceInfo() {
+    private DeviceInfo collectDeviceInfo(Context ctx) {
         DeviceInfo info = new DeviceInfo();
 
         // Basic info
@@ -189,7 +194,7 @@ public class DeviceInfoFragment extends Fragment {
         info.setCpuCores(Runtime.getRuntime().availableProcessors());
 
         // Memory info
-        ActivityManager am = (ActivityManager) requireContext().getSystemService(Context.ACTIVITY_SERVICE);
+        ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
         ActivityManager.MemoryInfo memInfo = new ActivityManager.MemoryInfo();
         am.getMemoryInfo(memInfo);
         info.setTotalMemory(memInfo.totalMem);
@@ -201,31 +206,31 @@ public class DeviceInfoFragment extends Fragment {
         info.setAvailableStorage(stat.getAvailableBytes());
 
         // Screen info
-        DisplayMetrics dm = requireContext().getResources().getDisplayMetrics();
+        DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
         info.setScreenResolution(dm.widthPixels + "x" + dm.heightPixels);
         info.setScreenDpi(dm.densityDpi);
 
         // Camera count
         try {
-            CameraManager cameraManager = (CameraManager) requireContext().getSystemService(Context.CAMERA_SERVICE);
+            CameraManager cameraManager = (CameraManager) ctx.getSystemService(Context.CAMERA_SERVICE);
             info.setCameraCount(cameraManager.getCameraIdList().length);
         } catch (Exception e) {
             info.setCameraCount(0);
         }
 
         // Sensor count
-        SensorManager sensorManager = (SensorManager) requireContext().getSystemService(Context.SENSOR_SERVICE);
+        SensorManager sensorManager = (SensorManager) ctx.getSystemService(Context.SENSOR_SERVICE);
         info.setSensorCount(sensorManager.getSensorList(Sensor.TYPE_ALL).size());
 
         // Network info
-        ConnectivityManager cm = (ConnectivityManager) requireContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+        ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
         NetworkInfo activeNetwork = cm.getActiveNetworkInfo();
         if (activeNetwork != null) {
             info.setNetworkType(activeNetwork.getTypeName());
         }
 
         // WiFi info
-        WifiManager wifiManager = (WifiManager) requireContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        WifiManager wifiManager = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
         if (wifiManager != null && wifiManager.isWifiEnabled()) {
             WifiInfo wifiInfo = wifiManager.getConnectionInfo();
             info.setWifiSsid(wifiInfo.getSSID());
@@ -235,7 +240,7 @@ public class DeviceInfoFragment extends Fragment {
         info.setIpAddress(getLocalIpAddress());
 
         // Carrier
-        TelephonyManager tm = (TelephonyManager) requireContext().getSystemService(Context.TELEPHONY_SERVICE);
+        TelephonyManager tm = (TelephonyManager) ctx.getSystemService(Context.TELEPHONY_SERVICE);
         info.setCarrier(tm.getNetworkOperatorName());
 
         return info;
@@ -309,9 +314,7 @@ public class DeviceInfoFragment extends Fragment {
             tvLegitimacyStatus.setText("可能被篡改");
             statusColor = R.color.status_risk;
         }
-        tvLegitimacyScore.setTextColor(ContextCompat.getColor(requireContext(), statusColor));
-        tvLegitimacyStatus.setTextColor(ContextCompat.getColor(requireContext(), statusColor));
-        progressLegitimacy.setProgressTintList(ContextCompat.getColorStateList(requireContext(), statusColor));
+        progressLegitimacy.setIndicatorColor(ContextCompat.getColor(requireContext(), statusColor));
 
         // Update check items
         updateCheckItem(tvCheckBuild, legitimacy.isBuildConsistent(), "Build一致性");
@@ -356,10 +359,12 @@ public class DeviceInfoFragment extends Fragment {
         }
     }
 
-    private void updateCheckItem(TextView tv, boolean passed, String label) {
-        tv.setText(label + (passed ? " ✓" : " ✗"));
-        tv.setTextColor(ContextCompat.getColor(requireContext(),
-                passed ? R.color.status_safe : R.color.status_risk));
+    private void updateCheckItem(Chip chip, boolean passed, String label) {
+        chip.setText(label + (passed ? " ✓" : " ✗"));
+        chip.setTextColor(passed
+                ? ContextCompat.getColor(requireContext(), R.color.status_safe)
+                : ContextCompat.getColor(requireContext(), R.color.status_risk));
+        chip.setChipStrokeColorResource(passed ? R.color.status_safe : R.color.status_risk);
     }
 
     private void setInfoRow(View row, String label, String value) {
@@ -410,8 +415,8 @@ public class DeviceInfoFragment extends Fragment {
 
             int color = service.isStatusValid() ? R.color.status_safe : R.color.status_risk;
             holder.tvStatus.setTextColor(ContextCompat.getColor(context, color));
-            holder.ivStatus.setImageResource(service.isStatusValid() ?
-                    R.drawable.ic_status_safe : R.drawable.ic_status_risk);
+            holder.ivStatus.setBackgroundTintList(android.content.res.ColorStateList.valueOf(
+                    ContextCompat.getColor(context, color)));
         }
 
         @Override
@@ -421,7 +426,7 @@ public class DeviceInfoFragment extends Fragment {
 
         static class ViewHolder extends RecyclerView.ViewHolder {
             TextView tvServiceName, tvStatus;
-            ImageView ivStatus;
+            View ivStatus;
 
             ViewHolder(@NonNull View itemView) {
                 super(itemView);
@@ -462,8 +467,8 @@ public class DeviceInfoFragment extends Fragment {
 
             int color = feature.exists() ? R.color.status_safe : R.color.status_warning;
             holder.tvValue.setTextColor(ContextCompat.getColor(context, color));
-            holder.ivStatus.setImageResource(feature.exists() ?
-                    R.drawable.ic_status_safe : R.drawable.ic_status_warning);
+            holder.ivStatus.setBackgroundTintList(android.content.res.ColorStateList.valueOf(
+                    ContextCompat.getColor(context, color)));
         }
 
         @Override
@@ -473,7 +478,7 @@ public class DeviceInfoFragment extends Fragment {
 
         static class ViewHolder extends RecyclerView.ViewHolder {
             TextView tvProperty, tvValue;
-            ImageView ivStatus;
+            View ivStatus;
 
             ViewHolder(@NonNull View itemView) {
                 super(itemView);

@@ -49,6 +49,43 @@ public class RootDetector {
             "me.phh.superuser"
     };
 
+    // Additional root manager packages (from sgmain heap dump)
+    private static final String[] ADDITIONAL_ROOT_PACKAGES = {
+            "com.yellowes.su",
+            "com.noshufou.android.su.elite",
+            "com.sekiro."
+    };
+
+    // Riru framework paths (from sgmain heap dump)
+    private static final String[] RIRU_PATHS = {
+            "/system/lib/libriruloader.so",
+            "/system/lib64/libriruloader.so",
+            "/data/misc/riru/modules/edxp",
+            "/data/misc/riru/modules/dreamland",
+            "/data/adb/riru/modules/edxp.prop",
+            "/data/adb/riru/modules/dreamland",
+            "/sbin/.magisk/modules/dreamland"
+    };
+
+    // Riru memory signatures
+    private static final String[] RIRU_MEMORY_SIGNATURES = {
+            "libriru_edxp.so",
+            "libriruloader.so",
+            "zygisk_module_entry"
+    };
+
+    // Additional Magisk paths (from sgmain heap dump)
+    private static final String[] ADDITIONAL_MAGISK_PATHS = {
+            "/init.magisk.rc",
+            "/sbin/magiskhide",
+            "/data/adb/magisk_simple",
+            "%s/su",
+            "%s/magisk"
+    };
+
+    // Riru/Yahfa class signatures
+    private static final String YAHFA_CLASS = "Lcom/elderdrivers/riru/edxp/core/Yahfa;";
+
     public RootDetector(Context context) {
         this.context = context;
         this.nativeDetector = NativeDetector.getInstance();
@@ -347,7 +384,156 @@ public class RootDetector {
         items.add(detectRootManagers());
         items.add(detectRootHiding());
         items.add(detectSuspiciousMounts());
+        items.add(detectRiruDreamland());
+        items.add(detectDynamicSuPaths());
         return items;
+    }
+
+    /**
+     * Detect Riru/Dreamland injection framework
+     * Based on sgmain SecGuard heap dump analysis
+     */
+    public DetectionItem detectRiruDreamland() {
+        DetectionItem item = new DetectionItem("Riru/Dreamland", "检测 Riru 注入框架和 Dreamland");
+
+        boolean javaDetected = false;
+        boolean nativeDetected = false;
+        boolean syscallDetected = false;
+
+        // Java layer: check Riru paths
+        for (String path : RIRU_PATHS) {
+            if (new File(path).exists()) {
+                javaDetected = true;
+                item.addDetectionDetail("📁 Riru 路径", path, "文件存在", DetectionLayer.JAVA, "📂");
+            }
+        }
+
+        // Java layer: check additional Magisk paths
+        for (String path : ADDITIONAL_MAGISK_PATHS) {
+            if (!path.contains("%s")) {
+                if (new File(path).exists()) {
+                    javaDetected = true;
+                    item.addDetectionDetail("📁 Magisk 路径", path, "文件存在", DetectionLayer.JAVA, "📂");
+                }
+            }
+        }
+
+        // Java layer: check YAHFA class
+        try {
+            Class.forName("com.elderdrivers.riru.edxp.core.Yahfa");
+            javaDetected = true;
+            item.addDetectionDetail("🧬 YAHFA", YAHFA_CLASS, "类已加载", DetectionLayer.JAVA, "⚠️");
+        } catch (ClassNotFoundException ignored) {}
+
+        // Java layer: check additional root packages
+        for (String pkg : ADDITIONAL_ROOT_PACKAGES) {
+            if (pkg.endsWith(".")) {
+                // Prefix match
+                try {
+                    List<android.content.pm.ApplicationInfo> apps =
+                        context.getPackageManager().getInstalledApplications(0);
+                    for (android.content.pm.ApplicationInfo app : apps) {
+                        if (app.packageName.startsWith(pkg)) {
+                            javaDetected = true;
+                            item.addDetectionDetail("📦 Root 包名", app.packageName, "已安装", DetectionLayer.JAVA, "📱");
+                        }
+                    }
+                } catch (Exception ignored) {}
+            } else {
+                if (isPackageInstalled(pkg)) {
+                    javaDetected = true;
+                    item.addDetectionDetail("📦 Root 包名", pkg, "已安装", DetectionLayer.JAVA, "📱");
+                }
+            }
+        }
+
+        item.setLayerResult(DetectionLayer.JAVA, javaDetected);
+
+        // Native layer: check paths and memory maps
+        for (String path : RIRU_PATHS) {
+            if (nativeDetector.fileExistsNative(path)) {
+                nativeDetected = true;
+            }
+        }
+
+        // Check /proc/self/maps for Riru signatures
+        try {
+            BufferedReader reader = new BufferedReader(new FileReader("/proc/self/maps"));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                for (String sig : RIRU_MEMORY_SIGNATURES) {
+                    if (line.contains(sig)) {
+                        nativeDetected = true;
+                        item.addDetectionDetail("💾 Riru 内存", sig, "映射: " + line.trim(), DetectionLayer.NATIVE, "🔍");
+                    }
+                }
+            }
+            reader.close();
+        } catch (Exception ignored) {}
+
+        item.setLayerResult(DetectionLayer.NATIVE, nativeDetected);
+
+        // Syscall layer
+        for (String path : RIRU_PATHS) {
+            if (nativeDetector.fileExistsSyscall(path)) {
+                syscallDetected = true;
+            }
+        }
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallDetected);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到 Riru/Dreamland 注入框架");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到");
+        }
+
+        return item;
+    }
+
+    /**
+     * Detect SU/Magisk via dynamic PATH scanning
+     * sgmain uses %s/su and %s/magisk patterns with PATH env
+     */
+    public DetectionItem detectDynamicSuPaths() {
+        DetectionItem item = new DetectionItem("动态路径检测", "通过 PATH 环境变量检测 su/magisk");
+
+        boolean detected = false;
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv != null) {
+            String[] dirs = pathEnv.split(":");
+            String[] binaries = {"su", "magisk", "magiskhide", "ksud", "apd"};
+
+            for (String dir : dirs) {
+                for (String bin : binaries) {
+                    String fullPath = dir + "/" + bin;
+                    // Java check
+                    if (new File(fullPath).exists()) {
+                        detected = true;
+                        item.addDetectionDetail("📁 PATH 扫描", fullPath, "文件存在 (目录: " + dir + ")", DetectionLayer.JAVA, "📂");
+                    }
+                    // Native check
+                    if (nativeDetector.fileExistsNative(fullPath)) {
+                        detected = true;
+                    }
+                }
+            }
+        }
+
+        item.setLayerResult(DetectionLayer.JAVA, detected);
+        item.setLayerResult(DetectionLayer.NATIVE, detected);
+        item.setLayerResult(DetectionLayer.SYSCALL, detected);
+
+        if (detected) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("在 PATH 中检测到 root 二进制文件");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("PATH 路径扫描安全");
+        }
+
+        return item;
     }
 
     // ===================== Java Layer Methods =====================

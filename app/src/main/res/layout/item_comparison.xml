@@ -5,15 +5,15 @@
     android:layout_height="wrap_content"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingVertical="6dp">
+    android:paddingVertical="8dp">
 
     <TextView
         android:id="@+id/tv_name"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_weight="2"
-        android:textColor="@color/text_primary"
-        android:textSize="12sp"
+        android:textAppearance="?attr/textAppearanceBodySmall"
+        android:textColor="?attr/colorOnSurface"
         tools:text="ANDROID_ID" />
 
     <TextView
@@ -22,8 +22,8 @@
         android:layout_height="wrap_content"
         android:layout_weight="1.5"
         android:fontFamily="monospace"
-        android:textColor="@color/text_secondary"
-        android:textSize="10sp"
+        android:textAppearance="?attr/textAppearanceLabelSmall"
+        android:textColor="?attr/colorOnSurfaceVariant"
         tools:text="9a8b.." />
 
     <TextView
@@ -32,8 +32,8 @@
         android:layout_height="wrap_content"
         android:layout_weight="1.5"
         android:fontFamily="monospace"
-        android:textColor="@color/text_secondary"
-        android:textSize="10sp"
+        android:textAppearance="?attr/textAppearanceLabelSmall"
+        android:textColor="?attr/colorOnSurfaceVariant"
         tools:text="9a8b.." />
 
     <TextView
@@ -42,14 +42,15 @@
         android:layout_height="wrap_content"
         android:layout_weight="1.5"
         android:fontFamily="monospace"
-        android:textColor="@color/text_secondary"
-        android:textSize="10sp"
+        android:textAppearance="?attr/textAppearanceLabelSmall"
+        android:textColor="?attr/colorOnSurfaceVariant"
         tools:text="9a8b.." />
 
-    <ImageView
+    <!-- Status Dot -->
+    <View
         android:id="@+id/iv_status"
-        android:layout_width="20dp"
-        android:layout_height="20dp"
-        android:src="@drawable/ic_status_safe" />
+        android:layout_width="8dp"
+        android:layout_height="8dp"
+        android:background="@drawable/status_dot" />
 
 </LinearLayout>

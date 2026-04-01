@@ -9,6 +9,7 @@
     <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:clipToPadding="false"
         android:fillViewport="true">
 
         <LinearLayout
@@ -17,158 +18,208 @@
             android:orientation="vertical"
             android:padding="16dp">
 
-            <!-- Status Overview Card -->
+            <!-- ====== Status Overview Card ====== -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/card_overview"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp">
+                app:cardBackgroundColor="?attr/colorSurfaceContainerLow"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="20dp">
 
+                    <!-- Header Row -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical">
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
 
                         <TextView
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
                             android:text="@string/detection_overview"
-                            android:textColor="@color/text_primary"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
+                            android:textAppearance="?attr/textAppearanceTitleMedium"
+                            android:textColor="?attr/colorOnSurface" />
 
                         <TextView
                             android:id="@+id/tv_last_check_time"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="12sp"
-                            tools:text="上次检测: 14:30" />
+                            android:textAppearance="?attr/textAppearanceLabelSmall"
+                            android:textColor="?attr/colorOnSurfaceVariant"
+                            tools:text="14:30" />
                     </LinearLayout>
 
-                    <!-- Status Count Row -->
+                    <!-- ====== Status Number Cards ====== -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="16dp"
                         android:orientation="horizontal">
 
-                        <!-- Safe Count -->
-                        <LinearLayout
+                        <!-- Safe Card -->
+                        <com.google.android.material.card.MaterialCardView
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
+                            android:layout_marginEnd="6dp"
                             android:layout_weight="1"
-                            android:gravity="center"
-                            android:orientation="vertical">
+                            app:cardBackgroundColor="@color/status_safe_container"
+                            app:cardCornerRadius="16dp"
+                            app:cardElevation="0dp"
+                            app:strokeWidth="0dp">
 
-                            <TextView
-                                android:id="@+id/tv_safe_count"
-                                android:layout_width="wrap_content"
+                            <LinearLayout
+                                android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:textColor="@color/status_safe"
-                                android:textSize="24sp"
-                                android:textStyle="bold"
-                                tools:text="12" />
+                                android:gravity="center"
+                                android:orientation="vertical"
+                                android:paddingVertical="14dp">
 
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="@string/status_safe"
-                                android:textColor="@color/text_secondary"
-                                android:textSize="12sp" />
-                        </LinearLayout>
+                                <TextView
+                                    android:id="@+id/tv_safe_count"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:textColor="@color/status_safe_on_container"
+                                    android:textSize="28sp"
+                                    android:textStyle="bold"
+                                    tools:text="12" />
 
-                        <!-- Risk Count -->
-                        <LinearLayout
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="2dp"
+                                    android:text="@string/status_safe"
+                                    android:textAppearance="?attr/textAppearanceLabelMedium"
+                                    android:textColor="@color/status_safe_on_container" />
+                            </LinearLayout>
+                        </com.google.android.material.card.MaterialCardView>
+
+                        <!-- Risk Card -->
+                        <com.google.android.material.card.MaterialCardView
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
+                            android:layout_marginHorizontal="4dp"
                             android:layout_weight="1"
-                            android:gravity="center"
-                            android:orientation="vertical">
+                            app:cardBackgroundColor="@color/status_risk_container"
+                            app:cardCornerRadius="16dp"
+                            app:cardElevation="0dp"
+                            app:strokeWidth="0dp">
 
-                            <TextView
-                                android:id="@+id/tv_risk_count"
-                                android:layout_width="wrap_content"
+                            <LinearLayout
+                                android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:textColor="@color/status_risk"
-                                android:textSize="24sp"
-                                android:textStyle="bold"
-                                tools:text="3" />
+                                android:gravity="center"
+                                android:orientation="vertical"
+                                android:paddingVertical="14dp">
 
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="@string/status_risk"
-                                android:textColor="@color/text_secondary"
-                                android:textSize="12sp" />
-                        </LinearLayout>
+                                <TextView
+                                    android:id="@+id/tv_risk_count"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:textColor="@color/status_risk_on_container"
+                                    android:textSize="28sp"
+                                    android:textStyle="bold"
+                                    tools:text="3" />
 
-                        <!-- Warning Count -->
-                        <LinearLayout
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="2dp"
+                                    android:text="@string/status_risk"
+                                    android:textAppearance="?attr/textAppearanceLabelMedium"
+                                    android:textColor="@color/status_risk_on_container" />
+                            </LinearLayout>
+                        </com.google.android.material.card.MaterialCardView>
+
+                        <!-- Warning Card -->
+                        <com.google.android.material.card.MaterialCardView
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
+                            android:layout_marginHorizontal="4dp"
                             android:layout_weight="1"
-                            android:gravity="center"
-                            android:orientation="vertical">
+                            app:cardBackgroundColor="@color/status_warning_container"
+                            app:cardCornerRadius="16dp"
+                            app:cardElevation="0dp"
+                            app:strokeWidth="0dp">
 
-                            <TextView
-                                android:id="@+id/tv_warning_count"
-                                android:layout_width="wrap_content"
+                            <LinearLayout
+                                android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:textColor="@color/status_warning"
-                                android:textSize="24sp"
-                                android:textStyle="bold"
-                                tools:text="1" />
+                                android:gravity="center"
+                                android:orientation="vertical"
+                                android:paddingVertical="14dp">
 
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="@string/status_warning"
-                                android:textColor="@color/text_secondary"
-                                android:textSize="12sp" />
-                        </LinearLayout>
+                                <TextView
+                                    android:id="@+id/tv_warning_count"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:textColor="@color/status_warning_on_container"
+                                    android:textSize="28sp"
+                                    android:textStyle="bold"
+                                    tools:text="1" />
 
-                        <!-- Unknown Count -->
-                        <LinearLayout
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="2dp"
+                                    android:text="@string/status_warning"
+                                    android:textAppearance="?attr/textAppearanceLabelMedium"
+                                    android:textColor="@color/status_warning_on_container" />
+                            </LinearLayout>
+                        </com.google.android.material.card.MaterialCardView>
+
+                        <!-- Unknown Card -->
+                        <com.google.android.material.card.MaterialCardView
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
+                            android:layout_marginStart="6dp"
                             android:layout_weight="1"
-                            android:gravity="center"
-                            android:orientation="vertical">
+                            app:cardBackgroundColor="@color/status_unknown_container"
+                            app:cardCornerRadius="16dp"
+                            app:cardElevation="0dp"
+                            app:strokeWidth="0dp">
 
-                            <TextView
-                                android:id="@+id/tv_unknown_count"
-                                android:layout_width="wrap_content"
+                            <LinearLayout
+                                android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:textColor="@color/status_unknown"
-                                android:textSize="24sp"
-                                android:textStyle="bold"
-                                tools:text="2" />
+                                android:gravity="center"
+                                android:orientation="vertical"
+                                android:paddingVertical="14dp">
 
-                            <TextView
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="@string/status_unknown"
-                                android:textColor="@color/text_secondary"
-                                android:textSize="12sp" />
-                        </LinearLayout>
+                                <TextView
+                                    android:id="@+id/tv_unknown_count"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:textColor="@color/status_unknown_on_container"
+                                    android:textSize="28sp"
+                                    android:textStyle="bold"
+                                    tools:text="2" />
+
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="2dp"
+                                    android:text="@string/status_unknown"
+                                    android:textAppearance="?attr/textAppearanceLabelMedium"
+                                    android:textColor="@color/status_unknown_on_container" />
+                            </LinearLayout>
+                        </com.google.android.material.card.MaterialCardView>
+
                     </LinearLayout>
 
-                    <!-- Score Section -->
+                    <!-- ====== Score Section ====== -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="16dp"
+                        android:layout_marginTop="20dp"
                         android:gravity="center_vertical"
                         android:orientation="horizontal">
 
@@ -176,16 +227,16 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/overall_score"
-                            android:textColor="@color/text_secondary"
-                            android:textSize="14sp" />
+                            android:textAppearance="?attr/textAppearanceBodyMedium"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
 
                         <TextView
                             android:id="@+id/tv_score"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginStart="8dp"
-                            android:textColor="@color/primary"
-                            android:textSize="18sp"
+                            android:textAppearance="?attr/textAppearanceTitleLarge"
+                            android:textColor="?attr/colorPrimary"
                             android:textStyle="bold"
                             tools:text="85/100" />
 
@@ -194,36 +245,39 @@
                             android:layout_height="0dp"
                             android:layout_weight="1" />
 
-                        <TextView
+                        <com.google.android.material.chip.Chip
                             android:id="@+id/tv_status_label"
                             android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:background="@drawable/card_background"
-                            android:paddingHorizontal="12dp"
-                            android:paddingVertical="4dp"
+                            android:layout_height="36dp"
+                            android:clickable="false"
                             android:textSize="12sp"
+                            app:chipCornerRadius="8dp"
+                            app:chipMinHeight="28dp"
                             tools:text="中等风险" />
                     </LinearLayout>
 
-                    <!-- Progress Bar -->
-                    <ProgressBar
+                    <!-- M3 Progress Indicator -->
+                    <com.google.android.material.progressindicator.LinearProgressIndicator
                         android:id="@+id/progress_score"
-                        style="@style/Widget.AppCompat.ProgressBar.Horizontal"
                         android:layout_width="match_parent"
-                        android:layout_height="8dp"
-                        android:layout_marginTop="8dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
                         android:max="100"
                         android:progress="85"
-                        android:progressTint="@color/primary" />
+                        app:indicatorColor="?attr/colorPrimary"
+                        app:trackColor="?attr/colorSurfaceVariant"
+                        app:trackCornerRadius="4dp"
+                        app:trackThickness="8dp" />
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Detection Groups RecyclerView -->
+            <!-- ====== Detection Groups List ====== -->
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/recycler_detection"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:clipToPadding="false"
                 android:nestedScrollingEnabled="false"
                 tools:itemCount="6"
                 tools:listitem="@layout/item_detection_group" />

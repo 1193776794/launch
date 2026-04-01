@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.cardview.widget.CardView xmlns:android="http://schemas.android.com/apk/res/android"
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_margin="16dp"
-    app:cardCornerRadius="12dp"
-    app:cardElevation="8dp">
+    android:layout_margin="24dp"
+    app:cardBackgroundColor="?attr/colorSurfaceContainerHigh"
+    app:cardCornerRadius="20dp"
+    app:cardElevation="4dp">
 
     <ScrollView
         android:layout_width="match_parent"
@@ -16,131 +17,108 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:padding="24dp">
 
-            <!-- 标题 -->
+            <!-- Title -->
             <TextView
                 android:id="@+id/dialog_title"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="检测项标题"
-                android:textSize="20sp"
-                android:textStyle="bold"
-                android:textColor="#333333"
-                android:paddingBottom="8dp" />
+                android:textAppearance="?attr/textAppearanceTitleLarge"
+                android:textColor="?attr/colorOnSurface" />
 
-            <!-- 描述 -->
+            <!-- Description -->
             <TextView
                 android:id="@+id/dialog_description"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
                 android:text="检测项描述"
-                android:textSize="14sp"
-                android:textColor="#666666"
-                android:paddingBottom="16dp" />
+                android:textAppearance="?attr/textAppearanceBodyMedium"
+                android:textColor="?attr/colorOnSurfaceVariant" />
 
-            <!-- 状态栏 -->
-            <LinearLayout
+            <!-- Status Bar -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:paddingTop="8dp"
-                android:paddingBottom="8dp"
-                android:background="#F5F5F5"
-                android:padding="12dp"
-                android:layout_marginBottom="16dp">
+                android:layout_marginTop="16dp"
+                app:cardBackgroundColor="?attr/colorSurfaceContainerLowest"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="0dp">
 
-                <View
-                    android:id="@+id/status_indicator"
-                    android:layout_width="12dp"
-                    android:layout_height="12dp"
-                    android:background="@drawable/status_indicator_circle"
-                    android:layout_marginEnd="8dp" />
-
-                <TextView
-                    android:id="@+id/dialog_status"
-                    android:layout_width="0dp"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="状态"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:padding="12dp">
 
-            <!-- 分隔线 -->
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:background="#E0E0E0"
-                android:layout_marginTop="8dp"
-                android:layout_marginBottom="8dp" />
+                    <View
+                        android:id="@+id/status_indicator"
+                        android:layout_width="10dp"
+                        android:layout_height="10dp"
+                        android:layout_marginEnd="10dp"
+                        android:background="@drawable/status_dot" />
 
-            <!-- 检测层级标题 -->
+                    <TextView
+                        android:id="@+id/dialog_status"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="状态"
+                        android:textAppearance="?attr/textAppearanceTitleSmall"
+                        android:textColor="?attr/colorOnSurface" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Detection Layers -->
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="📊 检测层级"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:textColor="#333333"
-                android:paddingTop="8dp"
-                android:paddingBottom="8dp" />
+                android:layout_marginTop="20dp"
+                android:text="检测层级"
+                android:textAppearance="?attr/textAppearanceTitleSmall"
+                android:textColor="?attr/colorOnSurface" />
 
-            <!-- 检测层级容器 -->
             <LinearLayout
                 android:id="@+id/layer_container"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:background="#FAFAFA"
-                android:padding="8dp"
-                android:layout_marginBottom="16dp">
-                <!-- 动态添加检测层级 -->
-            </LinearLayout>
-
-            <!-- 分隔线 -->
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:background="#E0E0E0"
                 android:layout_marginTop="8dp"
-                android:layout_marginBottom="8dp" />
+                android:orientation="vertical" />
 
-            <!-- 详细信息标题 -->
+            <!-- Divider -->
+            <com.google.android.material.divider.MaterialDivider
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginVertical="16dp" />
+
+            <!-- Details -->
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="🔍 检测详情"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:textColor="#333333"
-                android:paddingTop="8dp"
-                android:paddingBottom="8dp" />
+                android:text="检测详情"
+                android:textAppearance="?attr/textAppearanceTitleSmall"
+                android:textColor="?attr/colorOnSurface" />
 
-            <!-- 详细信息容器 -->
             <LinearLayout
                 android:id="@+id/details_container"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:layout_marginBottom="16dp">
-                <!-- 动态添加详细信息 -->
-            </LinearLayout>
+                android:layout_marginTop="8dp"
+                android:orientation="vertical" />
 
-            <!-- 关闭按钮 -->
-            <Button
+            <!-- Close Button -->
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btn_close"
+                style="@style/Widget.Material3.Button.TonalButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="关闭"
-                android:textSize="16sp"
-                android:textColor="#FFFFFF"
-                android:background="@drawable/button_primary"
-                android:layout_marginTop="8dp"
-                android:padding="12dp" />
+                android:layout_marginTop="20dp"
+                android:text="关闭" />
 
         </LinearLayout>
     </ScrollView>
 
-</androidx.cardview.widget.CardView>
+</com.google.android.material.card.MaterialCardView>

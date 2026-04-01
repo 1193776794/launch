@@ -2,21 +2,23 @@ package com.xff.launch;
 
 import android.animation.ObjectAnimator;
 import android.os.Bundle;
+import android.view.View;
 import android.view.animation.LinearInterpolator;
 import android.widget.ImageButton;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.WindowCompat;
 import androidx.fragment.app.Fragment;
 
 import com.google.android.material.bottomnavigation.BottomNavigationView;
-import com.xff.launch.ui.about.AboutFragment;
+import com.google.android.material.bottomsheet.BottomSheetDialog;
 import com.xff.launch.ui.deviceinfo.DeviceInfoFragment;
 import com.xff.launch.ui.environment.EnvironmentFragment;
 import com.xff.launch.ui.fingerprint.FingerprintFragment;
 
 /**
- * Main activity with bottom navigation
+ * Main activity with bottom navigation - Material Design 3
  */
 public class MainActivity extends AppCompatActivity {
 
@@ -26,17 +28,19 @@ public class MainActivity extends AppCompatActivity {
 
     private BottomNavigationView bottomNavigation;
     private ImageButton btnRefresh;
+    private ImageButton btnAbout;
 
     private EnvironmentFragment environmentFragment;
     private FingerprintFragment fingerprintFragment;
     private DeviceInfoFragment deviceInfoFragment;
-    private AboutFragment aboutFragment;
 
     private Fragment activeFragment;
     private ObjectAnimator rotateAnimator;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Edge-to-edge
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
@@ -48,6 +52,7 @@ public class MainActivity extends AppCompatActivity {
     private void initViews() {
         bottomNavigation = findViewById(R.id.bottom_navigation);
         btnRefresh = findViewById(R.id.btn_refresh);
+        btnAbout = findViewById(R.id.btn_about);
 
         // Setup refresh button animation
         rotateAnimator = ObjectAnimator.ofFloat(btnRefresh, "rotation", 0f, 360f);
@@ -56,17 +61,16 @@ public class MainActivity extends AppCompatActivity {
         rotateAnimator.setInterpolator(new LinearInterpolator());
 
         btnRefresh.setOnClickListener(v -> refreshCurrentFragment());
+        btnAbout.setOnClickListener(v -> showAboutBottomSheet());
     }
 
     private void initFragments() {
         environmentFragment = new EnvironmentFragment();
         fingerprintFragment = new FingerprintFragment();
         deviceInfoFragment = new DeviceInfoFragment();
-        aboutFragment = new AboutFragment();
 
         // Add all fragments but hide all except the first
         getSupportFragmentManager().beginTransaction()
-                .add(R.id.fragment_container, aboutFragment, "about").hide(aboutFragment)
                 .add(R.id.fragment_container, deviceInfoFragment, "device").hide(deviceInfoFragment)
                 .add(R.id.fragment_container, fingerprintFragment, "fingerprint").hide(fingerprintFragment)
                 .add(R.id.fragment_container, environmentFragment, "environment")
@@ -86,8 +90,6 @@ public class MainActivity extends AppCompatActivity {
                 selectedFragment = fingerprintFragment;
             } else if (itemId == R.id.navigation_device_info) {
                 selectedFragment = deviceInfoFragment;
-            } else if (itemId == R.id.navigation_about) {
-                selectedFragment = aboutFragment;
             }
 
             if (selectedFragment != null && selectedFragment != activeFragment) {
@@ -115,8 +117,6 @@ public class MainActivity extends AppCompatActivity {
             ((FingerprintFragment) activeFragment).collectFingerprints();
         } else if (activeFragment instanceof DeviceInfoFragment) {
             ((DeviceInfoFragment) activeFragment).loadDeviceInfo();
-        } else {
-            Toast.makeText(this, "此页面无需刷新", Toast.LENGTH_SHORT).show();
         }
 
         // Stop animation after delay
@@ -124,6 +124,13 @@ public class MainActivity extends AppCompatActivity {
             rotateAnimator.cancel();
             btnRefresh.setRotation(0f);
         }, 2000);
+    }
+
+    private void showAboutBottomSheet() {
+        BottomSheetDialog dialog = new BottomSheetDialog(this);
+        View view = getLayoutInflater().inflate(R.layout.bottom_sheet_about, null);
+        dialog.setContentView(view);
+        dialog.show();
     }
 
     public native String stringFromJNI();

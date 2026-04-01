@@ -1,10 +1,10 @@
 package com.xff.launch.ui.environment;
 
+import android.content.Context;
 import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -15,6 +15,9 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
+import com.google.android.material.chip.Chip;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
+
 import com.xff.launch.R;
 import com.xff.launch.adapter.DetectionGroupAdapter;
 import com.xff.launch.detector.DebugDetector;
@@ -24,6 +27,8 @@ import com.xff.launch.detector.ReadlinkDetector;
 import com.xff.launch.detector.RootDetector;
 import com.xff.launch.detector.SideChannelDetector;
 import com.xff.launch.detector.ZygoteDetector;
+import com.xff.launch.detector.TamperDetector;
+import com.xff.launch.detector.BootloaderDetector;
 import com.xff.launch.model.DetectionCategory;
 import com.xff.launch.model.DetectionGroup;
 import com.xff.launch.model.DetectionResult;
@@ -48,9 +53,9 @@ public class EnvironmentFragment extends Fragment {
     private TextView tvWarningCount;
     private TextView tvUnknownCount;
     private TextView tvScore;
-    private TextView tvStatusLabel;
+    private Chip tvStatusLabel;
     private TextView tvLastCheckTime;
-    private ProgressBar progressScore;
+    private LinearProgressIndicator progressScore;
     private RecyclerView recyclerDetection;
 
     private DetectionGroupAdapter adapter;
@@ -110,13 +115,29 @@ public class EnvironmentFragment extends Fragment {
             executor = Executors.newSingleThreadExecutor();
         }
 
+        // Cache context and strings on main thread before going to background
+        if (!isAdded()) return;
+        final Context ctx = requireContext().getApplicationContext();
+        final String strRoot = getString(R.string.category_root);
+        final String strHook = getString(R.string.category_hook);
+        final String strEmulator = getString(R.string.category_emulator);
+        final String strDebug = getString(R.string.category_debug);
+        final String strSideChannel = getString(R.string.category_side_channel);
+        final String strReadlink = getString(R.string.category_readlink);
+        final String strZygote = getString(R.string.category_zygote);
+        final String strTamper = getString(R.string.category_tamper);
+        final String strBootloader = getString(R.string.category_bootloader);
+
         swipeRefresh.setRefreshing(true);
 
         executor.execute(() -> {
-            DetectionResult result = performDetection();
+            DetectionResult result = performDetection(ctx,
+                    strRoot, strHook, strEmulator, strDebug, strSideChannel,
+                    strReadlink, strZygote, strTamper, strBootloader);
 
-            if (getActivity() != null) {
+            if (getActivity() != null && isAdded()) {
                 getActivity().runOnUiThread(() -> {
+                    if (!isAdded()) return;
                     currentResult = result;
                     updateUI(result);
                     swipeRefresh.setRefreshing(false);
@@ -125,79 +146,102 @@ public class EnvironmentFragment extends Fragment {
         });
     }
 
-    private DetectionResult performDetection() {
+    private DetectionResult performDetection(Context ctx,
+            String strRoot, String strHook, String strEmulator, String strDebug,
+            String strSideChannel, String strReadlink, String strZygote,
+            String strTamper, String strBootloader) {
         DetectionResult result = new DetectionResult();
         List<DetectionGroup> groups = new ArrayList<>();
 
         // Root Detection Group
         DetectionGroup rootGroup = new DetectionGroup(
-                getString(R.string.category_root),
+                strRoot,
                 DetectionCategory.ROOT,
                 R.drawable.ic_root
         );
-        RootDetector rootDetector = new RootDetector(requireContext());
+        RootDetector rootDetector = new RootDetector(ctx);
         rootGroup.setItems(rootDetector.getAllDetections());
         groups.add(rootGroup);
 
         // Hook Detection Group
         DetectionGroup hookGroup = new DetectionGroup(
-                getString(R.string.category_hook),
+                strHook,
                 DetectionCategory.HOOK,
                 R.drawable.ic_hook
         );
-        HookDetector hookDetector = new HookDetector(requireContext());
+        HookDetector hookDetector = new HookDetector(ctx);
         hookGroup.setItems(hookDetector.getAllDetections());
         groups.add(hookGroup);
 
         // Emulator Detection Group
         DetectionGroup emulatorGroup = new DetectionGroup(
-                getString(R.string.category_emulator),
+                strEmulator,
                 DetectionCategory.EMULATOR,
                 R.drawable.ic_emulator
         );
-        EmulatorDetector emulatorDetector = new EmulatorDetector(requireContext());
+        EmulatorDetector emulatorDetector = new EmulatorDetector(ctx);
         emulatorGroup.setItems(emulatorDetector.getAllDetections());
         groups.add(emulatorGroup);
 
         // Debug Detection Group
         DetectionGroup debugGroup = new DetectionGroup(
-                getString(R.string.category_debug),
+                strDebug,
                 DetectionCategory.DEBUG,
                 R.drawable.ic_debug
         );
-        DebugDetector debugDetector = new DebugDetector(requireContext());
+        DebugDetector debugDetector = new DebugDetector(ctx);
         debugGroup.setItems(debugDetector.getAllDetections());
         groups.add(debugGroup);
 
-        // Side-Channel Attack Detection Group
+        // Runtime Integrity Detection Group
         DetectionGroup sideChannelGroup = new DetectionGroup(
-                getString(R.string.category_side_channel),
+                strSideChannel,
                 DetectionCategory.SIDE_CHANNEL,
                 R.drawable.ic_side_channel
         );
-        SideChannelDetector sideChannelDetector = new SideChannelDetector(requireContext());
+        SideChannelDetector sideChannelDetector = new SideChannelDetector(ctx);
         sideChannelGroup.setItems(sideChannelDetector.getAllDetections());
         groups.add(sideChannelGroup);
 
-        // Readlink Detection Group (Symlink/Proc/Namespace)
+        // Readlink Detection Group
         DetectionGroup readlinkGroup = new DetectionGroup(
-                getString(R.string.category_readlink),
+                strReadlink,
                 DetectionCategory.READLINK,
                 R.drawable.ic_readlink
         );
-        ReadlinkDetector readlinkDetector = new ReadlinkDetector(requireContext());
+        ReadlinkDetector readlinkDetector = new ReadlinkDetector(ctx);
         readlinkGroup.setItems(readlinkDetector.getAllDetections());
         groups.add(readlinkGroup);
 
-        // Zygote Injection Detection Group (Zygisk/Riru/LSPosed)
+        // Zygote Injection Detection Group
         DetectionGroup zygoteGroup = new DetectionGroup(
-                getString(R.string.category_zygote),
+                strZygote,
                 DetectionCategory.ZYGOTE,
                 R.drawable.ic_zygote
         );
-        ZygoteDetector zygoteDetector = new ZygoteDetector(requireContext());
+        ZygoteDetector zygoteDetector = new ZygoteDetector(ctx);
         zygoteGroup.setItems(zygoteDetector.getAllDetections());
         groups.add(zygoteGroup);
+
+        // Tamper/Device Modification Detection Group
+        DetectionGroup tamperGroup = new DetectionGroup(
+                strTamper,
+                DetectionCategory.TAMPER,
+                R.drawable.ic_tamper
+        );
+        TamperDetector tamperDetector = new TamperDetector(ctx);
+        tamperGroup.setItems(tamperDetector.getAllDetections());
+        groups.add(tamperGroup);
+
+        // Bootloader Unlock Detection Group
+        DetectionGroup bootloaderGroup = new DetectionGroup(
+                strBootloader,
+                DetectionCategory.BOOTLOADER,
+                R.drawable.ic_bootloader
+        );
+        BootloaderDetector bootloaderDetector = new BootloaderDetector(ctx);
+        bootloaderGroup.setItems(bootloaderDetector.getAllDetections());
+        groups.add(bootloaderGroup);
 
         result.setGroups(groups);
         result.calculateScore();
@@ -217,28 +261,31 @@ public class EnvironmentFragment extends Fragment {
         tvScore.setText(getString(R.string.score_format, score));
         progressScore.setProgress(score);
 
-        // Update status label
+        // Update status label (M3 Chip)
         DetectionStatus status = result.getOverallStatus();
         switch (status) {
             case SAFE:
                 tvStatusLabel.setText(getString(R.string.status_safe));
-                tvStatusLabel.setBackgroundResource(R.drawable.card_background);
-                tvStatusLabel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_safe));
-                progressScore.setProgressTintList(ContextCompat.getColorStateList(requireContext(), R.color.status_safe));
+                tvStatusLabel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_safe_on_container));
+                tvStatusLabel.setChipBackgroundColorResource(R.color.status_safe_container);
+                progressScore.setIndicatorColor(ContextCompat.getColor(requireContext(), R.color.status_safe));
                 break;
             case RISK:
                 tvStatusLabel.setText("高风险");
-                tvStatusLabel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_risk));
-                progressScore.setProgressTintList(ContextCompat.getColorStateList(requireContext(), R.color.status_risk));
+                tvStatusLabel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_risk_on_container));
+                tvStatusLabel.setChipBackgroundColorResource(R.color.status_risk_container);
+                progressScore.setIndicatorColor(ContextCompat.getColor(requireContext(), R.color.status_risk));
                 break;
             case WARNING:
                 tvStatusLabel.setText("中等风险");
-                tvStatusLabel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_warning));
-                progressScore.setProgressTintList(ContextCompat.getColorStateList(requireContext(), R.color.status_warning));
+                tvStatusLabel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_warning_on_container));
+                tvStatusLabel.setChipBackgroundColorResource(R.color.status_warning_container);
+                progressScore.setIndicatorColor(ContextCompat.getColor(requireContext(), R.color.status_warning));
                 break;
             default:
                 tvStatusLabel.setText(getString(R.string.status_unknown));
-                tvStatusLabel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_unknown));
+                tvStatusLabel.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_unknown_on_container));
+                tvStatusLabel.setChipBackgroundColorResource(R.color.status_unknown_container);
                 break;
         }
 

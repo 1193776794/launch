@@ -92,7 +92,15 @@ public class FingerprintFragment extends Fragment {
         nativeDetector = NativeDetector.getInstance();
         initViews(view);
         setupCopyButtons();
-        collectFingerprints();
+
+        // Request read permission first; collect after permission resolved
+        if (hasReadPermission()) {
+            collectFingerprints();
+        } else {
+            requestStoragePermissionIfNeeded();
+            // Also collect immediately (write works without permission, read will show "新设备" until granted)
+            collectFingerprints();
+        }
     }
 
     private void initViews(View view) {
@@ -148,8 +156,9 @@ public class FingerprintFragment extends Fragment {
         executor.execute(() -> {
             FingerprintResult result = performCollection();
 
-            if (getActivity() != null) {
+            if (getActivity() != null && isAdded()) {
                 getActivity().runOnUiThread(() -> {
+                    if (!isAdded()) return;
                     currentResult = result;
                     updateUI(result);
                     swipeRefresh.setRefreshing(false);
@@ -802,25 +811,53 @@ public class FingerprintFragment extends Fragment {
         result.setSoftwareHash(sha256(swString));
 
         // ==================== Persistent Fingerprint ====================
+        // Only run persistent logic when we have read permission.
+        // Without it, we can't distinguish "new device" from "reinstall but can't read yet".
+        String persistentToken = "";
+        String persistentStatus = "等待权限";
         try {
+            Context ctx = requireContext();
+            boolean canRead = hasReadPermission();
             String currentHwHash = result.getHardwareHash();
-            if (PersistentFingerprint.exists()) {
+
+            if (canRead && PersistentFingerprint.exists(ctx)) {
+                // Found old fingerprint — load and compare
                 PersistentFingerprint.PersistentData pData =
-                        PersistentFingerprint.load(currentHwHash);
-                if (pData != null && pData.deviceChanged) {
-                    result.setPersistentPenalty(15);
-                    result.calculateTrustLevel();
-                }
+                        PersistentFingerprint.load(ctx, currentHwHash);
                 if (pData != null) {
-                    PersistentFingerprint.save(pData.token, currentHwHash);
+                    persistentToken = pData.token;
+                    if (pData.deviceChanged) {
+                        persistentStatus = "设备已变更";
+                        result.setPersistentPenalty(15);
+                        result.calculateTrustLevel();
+                    } else {
+                        persistentStatus = "设备未变更";
+                    }
+                    // Update with current hash
+                    PersistentFingerprint.save(ctx, pData.token, currentHwHash);
                 }
-            } else {
-                String token = PersistentFingerprint.generateToken();
-                PersistentFingerprint.save(token, currentHwHash);
+            } else if (canRead) {
+                // Have permission but no file — truly new device
+                persistentToken = PersistentFingerprint.generateToken();
+                PersistentFingerprint.save(ctx, persistentToken, currentHwHash);
+                persistentStatus = "新设备 (首次记录)";
             }
+            // else: no permission yet — show "等待权限", don't write anything
         } catch (Exception e) {
-            // Storage permission may not be granted — non-fatal
+            persistentToken = "N/A";
+            persistentStatus = "无存储权限";
         }
+
+        // Add persistent token as a fingerprint item for display
+        FingerprintItem persistItem = new FingerprintItem("persistent_token", "持久化 Token");
+        persistItem.setLayerValue(DetectionLayer.JAVA, nonEmpty(persistentToken, "N/A"));
+        persistItem.setLayerValue(DetectionLayer.NATIVE, nonEmpty(persistentStatus));
+        persistItem.setLayerValue(DetectionLayer.SYSCALL, nonEmpty(persistentToken, "N/A"));
+        // Token is same across layers by definition — mark consistent
+        items.add(persistItem);
+
+        // Re-set items to include persistent token
+        result.setItems(items);
 
         return result;
     }
@@ -877,6 +914,55 @@ public class FingerprintFragment extends Fragment {
             context = "unknown";
         }
         return state + "|" + context;
+    }
+
+    /**
+     * Request MANAGE_EXTERNAL_STORAGE permission for persistent fingerprint.
+     * On Android 11+, this opens the system settings page for the user to grant.
+     */
+    private static final int PERM_REQUEST_CODE = 1001;
+
+    /**
+     * Check if we have read permission for MediaStore (needed to recover fingerprint after reinstall).
+     */
+    private boolean hasReadPermission() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            return requireContext().checkSelfPermission("android.permission.READ_MEDIA_IMAGES")
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return requireContext().checkSelfPermission("android.permission.READ_EXTERNAL_STORAGE")
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        return true; // Android 9: requestLegacyExternalStorage handles it
+    }
+
+    /**
+     * Request read permission for persistent fingerprint recovery after reinstall.
+     * MediaStore write needs NO permission. Read after reinstall needs:
+     *   Android 13+: READ_MEDIA_IMAGES (runtime dialog)
+     *   Android 10-12: READ_EXTERNAL_STORAGE (runtime dialog)
+     *   Android 9: requestLegacyExternalStorage=true (manifest, no dialog)
+     */
+    private void requestStoragePermissionIfNeeded() {
+        String permission;
+        if (Build.VERSION.SDK_INT >= 33) {
+            permission = "android.permission.READ_MEDIA_IMAGES";
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            permission = "android.permission.READ_EXTERNAL_STORAGE";
+        } else {
+            return;
+        }
+        requestPermissions(new String[]{permission}, PERM_REQUEST_CODE);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == PERM_REQUEST_CODE && grantResults.length > 0
+                && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            // Permission granted — re-collect to recover persistent fingerprint
+            collectFingerprints();
+        }
     }
 
     /**

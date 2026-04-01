@@ -89,19 +89,29 @@ private:
 
     /**
      * Parse ELF header and find .text section
+     * @param text_offset  [out] file offset of .text
+     * @param text_size    [out] size of .text
+     * @param text_vaddr   [out] virtual address of .text (for memory mapping)
      */
     static bool parseElfAndFindTextSection(const std::vector<uint8_t>& elf_data,
                                           size_t& text_offset,
-                                          size_t& text_size);
+                                          size_t& text_size,
+                                          size_t& text_vaddr);
 
     /**
      * Compare memory and disk .text section
+     * @param mem_base  Load base address of the library in memory
+     * @param disk_data ELF file bytes from disk
+     * @param text_offset File offset of .text
+     * @param text_size   Size of .text
+     * @param text_vaddr  Virtual address of .text (used to compute memory address)
      * @return true if different (hooked)
      */
     static bool compareTextSections(uintptr_t mem_base,
                                    const std::vector<uint8_t>& disk_data,
                                    size_t text_offset,
-                                   size_t text_size);
+                                   size_t text_size,
+                                   size_t text_vaddr);
 
     /**
      * Check for inline hooks in function prologue
@@ -130,6 +140,19 @@ private:
      * List of critical functions to check in libart
      */
     static const char* CRITICAL_LIBART_FUNCTIONS[];
+
+    /**
+     * List of critical dlopen-related functions to check
+     * These are in libdl.so or the dynamic linker
+     */
+    static const char* CRITICAL_DLOPEN_FUNCTIONS[];
+
+    /**
+     * Check linker functions by directly parsing ELF from disk
+     * Bypasses dlopen/dlsym (which may themselves be hooked)
+     * @return number of hooked linker functions found
+     */
+    static int checkLinkerFunctions();
 };
 
 #endif // LAUNCH_INTEGRITY_DETECTOR_H

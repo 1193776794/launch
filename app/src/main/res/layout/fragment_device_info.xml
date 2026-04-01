@@ -9,6 +9,7 @@
     <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:clipToPadding="false"
         android:fillViewport="true">
 
         <LinearLayout
@@ -17,147 +18,164 @@
             android:orientation="vertical"
             android:padding="16dp">
 
-            <!-- Legitimacy Overview Card -->
+            <!-- ====== Legitimacy Score Card ====== -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp">
+                app:cardBackgroundColor="?attr/colorPrimaryContainer"
+                app:cardCornerRadius="20dp"
+                app:cardElevation="0dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="24dp">
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/device_legitimacy"
-                        android:textColor="@color/text_primary"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="?attr/colorOnPrimaryContainer" />
 
                     <!-- Score Display -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:background="@color/background"
+                        android:layout_marginTop="16dp"
                         android:gravity="center"
-                        android:orientation="vertical"
-                        android:padding="16dp">
+                        android:orientation="vertical">
 
                         <TextView
                             android:id="@+id/tv_legitimacy_score"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:textColor="@color/status_safe"
-                            android:textSize="36sp"
+                            android:textColor="?attr/colorOnPrimaryContainer"
+                            android:textSize="48sp"
                             android:textStyle="bold"
-                            tools:text="95/100" />
+                            tools:text="95" />
 
                         <TextView
                             android:id="@+id/tv_legitimacy_status"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="4dp"
-                            android:textColor="@color/status_safe"
-                            android:textSize="14sp"
+                            android:textAppearance="?attr/textAppearanceBodyLarge"
+                            android:textColor="?attr/colorOnPrimaryContainer"
                             tools:text="正常" />
 
-                        <ProgressBar
+                        <com.google.android.material.progressindicator.LinearProgressIndicator
                             android:id="@+id/progress_legitimacy"
-                            style="@style/Widget.AppCompat.ProgressBar.Horizontal"
                             android:layout_width="match_parent"
-                            android:layout_height="8dp"
-                            android:layout_marginTop="12dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="16dp"
                             android:max="100"
                             android:progress="95"
-                            android:progressTint="@color/status_safe" />
+                            app:indicatorColor="?attr/colorOnPrimaryContainer"
+                            app:trackColor="@color/md_theme_light_primary"
+                            app:trackCornerRadius="4dp"
+                            app:trackThickness="8dp" />
                     </LinearLayout>
 
-                    <!-- Check Items -->
-                    <LinearLayout
+                    <!-- Check Items - Chip Group -->
+                    <com.google.android.material.chip.ChipGroup
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:orientation="horizontal">
+                        android:layout_marginTop="16dp"
+                        app:chipSpacingHorizontal="6dp"
+                        app:chipSpacingVertical="4dp">
 
-                        <TextView
+                        <com.google.android.material.chip.Chip
                             android:id="@+id/tv_check_build"
-                            android:layout_width="0dp"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:gravity="center"
-                            android:textSize="12sp"
+                            android:clickable="false"
+                            android:textSize="11sp"
+                            app:chipBackgroundColor="@android:color/transparent"
+                            app:chipCornerRadius="8dp"
+                            app:chipMinHeight="28dp"
+                            app:chipStrokeColor="?attr/colorOnPrimaryContainer"
+                            app:chipStrokeWidth="1dp"
+                            android:textColor="?attr/colorOnPrimaryContainer"
                             tools:text="Build一致性 ✓" />
 
-                        <TextView
+                        <com.google.android.material.chip.Chip
                             android:id="@+id/tv_check_rom"
-                            android:layout_width="0dp"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:gravity="center"
-                            android:textSize="12sp"
+                            android:clickable="false"
+                            android:textSize="11sp"
+                            app:chipBackgroundColor="@android:color/transparent"
+                            app:chipCornerRadius="8dp"
+                            app:chipMinHeight="28dp"
+                            app:chipStrokeColor="?attr/colorOnPrimaryContainer"
+                            app:chipStrokeWidth="1dp"
+                            android:textColor="?attr/colorOnPrimaryContainer"
                             tools:text="ROM匹配 ✓" />
 
-                        <TextView
+                        <com.google.android.material.chip.Chip
                             android:id="@+id/tv_check_service"
-                            android:layout_width="0dp"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:gravity="center"
-                            android:textSize="12sp"
+                            android:clickable="false"
+                            android:textSize="11sp"
+                            app:chipBackgroundColor="@android:color/transparent"
+                            app:chipCornerRadius="8dp"
+                            app:chipMinHeight="28dp"
+                            app:chipStrokeColor="?attr/colorOnPrimaryContainer"
+                            app:chipStrokeWidth="1dp"
+                            android:textColor="?attr/colorOnPrimaryContainer"
                             tools:text="服务匹配 ✓" />
-                    </LinearLayout>
 
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:orientation="horizontal">
-
-                        <TextView
+                        <com.google.android.material.chip.Chip
                             android:id="@+id/tv_check_hardware"
-                            android:layout_width="0dp"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:gravity="center"
-                            android:textSize="12sp"
+                            android:clickable="false"
+                            android:textSize="11sp"
+                            app:chipBackgroundColor="@android:color/transparent"
+                            app:chipCornerRadius="8dp"
+                            app:chipMinHeight="28dp"
+                            app:chipStrokeColor="?attr/colorOnPrimaryContainer"
+                            app:chipStrokeWidth="1dp"
+                            android:textColor="?attr/colorOnPrimaryContainer"
                             tools:text="硬件一致 ✓" />
 
-                        <TextView
+                        <com.google.android.material.chip.Chip
                             android:id="@+id/tv_check_fingerprint"
-                            android:layout_width="0dp"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:gravity="center"
-                            android:textSize="12sp"
+                            android:clickable="false"
+                            android:textSize="11sp"
+                            app:chipBackgroundColor="@android:color/transparent"
+                            app:chipCornerRadius="8dp"
+                            app:chipMinHeight="28dp"
+                            app:chipStrokeColor="?attr/colorOnPrimaryContainer"
+                            app:chipStrokeWidth="1dp"
+                            android:textColor="?attr/colorOnPrimaryContainer"
                             tools:text="指纹格式 ✓" />
 
-                        <View
-                            android:layout_width="0dp"
-                            android:layout_height="0dp"
-                            android:layout_weight="1" />
-                    </LinearLayout>
+                    </com.google.android.material.chip.ChipGroup>
+
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Basic Info Card -->
+            <!-- ====== Basic Info Card ====== -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp">
+                android:layout_marginBottom="12dp"
+                app:cardBackgroundColor="?attr/colorSurfaceContainerLow"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="20dp">
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -165,47 +183,32 @@
                         android:drawableStart="@drawable/ic_phone"
                         android:drawablePadding="8dp"
                         android:text="@string/basic_info"
-                        android:textColor="@color/text_primary"
-                        android:textSize="16sp"
-                        android:textStyle="bold"
-                        app:drawableTint="@color/primary" />
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="?attr/colorOnSurface"
+                        app:drawableTint="?attr/colorPrimary" />
 
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_brand" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_model" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_manufacturer" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_device" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_board" />
-
+                    <include android:id="@+id/row_brand" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_model" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_manufacturer" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_device" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_board" layout="@layout/item_info_row" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- System Info Card -->
+            <!-- ====== System Info Card ====== -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp">
+                android:layout_marginBottom="12dp"
+                app:cardBackgroundColor="?attr/colorSurfaceContainerLow"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="20dp">
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -213,47 +216,32 @@
                         android:drawableStart="@drawable/ic_info"
                         android:drawablePadding="8dp"
                         android:text="@string/system_info"
-                        android:textColor="@color/text_primary"
-                        android:textSize="16sp"
-                        android:textStyle="bold"
-                        app:drawableTint="@color/primary" />
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="?attr/colorOnSurface"
+                        app:drawableTint="?attr/colorPrimary" />
 
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_android_version" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_api_level" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_rom_version" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_security_patch" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_kernel_version" />
-
+                    <include android:id="@+id/row_android_version" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_api_level" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_rom_version" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_security_patch" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_kernel_version" layout="@layout/item_info_row" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Hardware Info Card -->
+            <!-- ====== Hardware Info Card ====== -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp">
+                android:layout_marginBottom="12dp"
+                app:cardBackgroundColor="?attr/colorSurfaceContainerLow"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="20dp">
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -261,47 +249,32 @@
                         android:drawableStart="@drawable/ic_debug"
                         android:drawablePadding="8dp"
                         android:text="@string/hardware_info"
-                        android:textColor="@color/text_primary"
-                        android:textSize="16sp"
-                        android:textStyle="bold"
-                        app:drawableTint="@color/primary" />
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="?attr/colorOnSurface"
+                        app:drawableTint="?attr/colorPrimary" />
 
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_cpu" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_memory" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_storage" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_screen" />
-
-                    <include
-                        layout="@layout/item_info_row"
-                        android:id="@+id/row_sensors" />
-
+                    <include android:id="@+id/row_cpu" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_memory" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_storage" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_screen" layout="@layout/item_info_row" />
+                    <include android:id="@+id/row_sensors" layout="@layout/item_info_row" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Vendor Services Card -->
+            <!-- ====== Vendor Services Card ====== -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp">
+                android:layout_marginBottom="12dp"
+                app:cardBackgroundColor="?attr/colorSurfaceContainerLow"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="20dp">
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -309,10 +282,9 @@
                         android:drawableStart="@drawable/ic_integrity"
                         android:drawablePadding="8dp"
                         android:text="@string/vendor_services"
-                        android:textColor="@color/text_primary"
-                        android:textSize="16sp"
-                        android:textStyle="bold"
-                        app:drawableTint="@color/primary" />
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="?attr/colorOnSurface"
+                        app:drawableTint="?attr/colorPrimary" />
 
                     <androidx.recyclerview.widget.RecyclerView
                         android:id="@+id/recycler_vendor_services"
@@ -320,22 +292,22 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="12dp"
                         android:nestedScrollingEnabled="false" />
-
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- ROM Features Card -->
+            <!-- ====== ROM Features Card ====== -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                app:cardCornerRadius="12dp"
-                app:cardElevation="2dp">
+                app:cardBackgroundColor="?attr/colorSurfaceContainerLow"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="20dp">
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -343,10 +315,9 @@
                         android:drawableStart="@drawable/ic_shield"
                         android:drawablePadding="8dp"
                         android:text="@string/rom_features"
-                        android:textColor="@color/text_primary"
-                        android:textSize="16sp"
-                        android:textStyle="bold"
-                        app:drawableTint="@color/primary" />
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="?attr/colorOnSurface"
+                        app:drawableTint="?attr/colorPrimary" />
 
                     <androidx.recyclerview.widget.RecyclerView
                         android:id="@+id/recycler_rom_features"
@@ -354,7 +325,6 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="12dp"
                         android:nestedScrollingEnabled="false" />
-
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

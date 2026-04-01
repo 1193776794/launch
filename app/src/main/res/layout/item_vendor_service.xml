@@ -5,30 +5,30 @@
     android:layout_height="wrap_content"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingVertical="8dp">
+    android:paddingVertical="10dp">
 
     <TextView
         android:id="@+id/tv_service_name"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_weight="1"
-        android:textColor="@color/text_primary"
-        android:textSize="14sp"
+        android:textAppearance="?attr/textAppearanceBodyMedium"
+        android:textColor="?attr/colorOnSurface"
         tools:text="小米服务" />
 
-    <ImageView
+    <View
         android:id="@+id/iv_status"
-        android:layout_width="16dp"
-        android:layout_height="16dp"
-        android:layout_marginEnd="4dp"
-        android:src="@drawable/ic_status_safe" />
+        android:layout_width="8dp"
+        android:layout_height="8dp"
+        android:layout_marginEnd="8dp"
+        android:background="@drawable/status_dot" />
 
     <TextView
         android:id="@+id/tv_status"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:textAppearance="?attr/textAppearanceBodySmall"
         android:textColor="@color/status_safe"
-        android:textSize="12sp"
-        tools:text="已安装 (com.xiaomi.account)" />
+        tools:text="已安装" />
 
 </LinearLayout>

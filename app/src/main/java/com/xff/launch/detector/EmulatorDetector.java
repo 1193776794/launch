@@ -37,12 +37,115 @@ public class EmulatorDetector {
             "Android SDK built for x86"
     };
 
-    // Known emulator packages
+    // Known emulator packages (expanded from sgmain heap dump)
     private static final String[] EMULATOR_PACKAGES = {
             "com.bignox.app.store.hd",
             "com.microvirt.guide",
-            "com.bluestacks.settings"
+            "com.bluestacks.settings",
+            "com.microvirt.market",
+            "com.microvirt.launcher",
+            "com.microvirt.installe",
+            "com.bluestacks.appmart",
+            "com.bluestacks.home",
+            "com.bignox.google.installer"
     };
+
+    // Redroid (Docker cloud phone) properties - 2024 new (from sgmain heap dump)
+    private static final String[] REDROID_PROPERTIES = {
+            "ro.boot.redroid_height",
+            "ro.boot.redroid_width",
+            "ro.boot.redroid_wifi",
+            "ro.boot.redroid_wifi_gateway",
+            "ro.boot.redroid_net_dns1",
+            "ro.boot.redroid_net_ndns",
+            "ro.kernel.redroid.width",
+            "ro.kernel.redroid.height",
+            "ro.kernel.redroid.fps",
+            "init.svc.redroid_net"
+    };
+
+    // VirtualBox deep detection paths (from sgmain heap dump - 20+ paths)
+    private static final String[] VBOX_PATHS = {
+            "/sys/module/vboxguest",
+            "/sys/module/vboxvideo",
+            "/sys/module/vboxsf",
+            "/sys/class/misc/vboxuser",
+            "/sys/class/misc/vboxguest",
+            "/sys/class/bdi/vboxsf-c",
+            "/sys/devices/virtual/misc/vboxuser",
+            "/sys/devices/virtual/misc/vboxguest",
+            "/sys/devices/virtual/bdi/vboxsf-c",
+            "/sys/bus/pci/drivers/vboxguest",
+            "/dev/vboxuser",
+            "/dev/vboxguest",
+            "/init.vbox86.rc",
+            "/system/lib/hw/gralloc.vbox86.so",
+            "/system/lib/hw/sensors.vbox86.so",
+            "/system/lib/hw/audio.primary.vbox86.so",
+            "/system/lib/hw/gps.vbox86.so",
+            "/system/lib/vboxguest.ko",
+            "/system/lib/vboxvideo.ko",
+            "/system/lib/vboxsf.ko",
+            "/system/bin/mount.vboxsf",
+            "/system/xbin/mount.vboxsf",
+            "/system/bin/androVM-vbox-sf"
+    };
+
+    // Nox deep detection paths (from sgmain heap dump)
+    private static final String[] NOX_PATHS = {
+            "/system/lib/libnoxd.so",
+            "/system/lib/libnoxspeedup.so",
+            "/system/bin/nox-prop",
+            "/system/bin/noxd",
+            "/system/bin/shellnox",
+            "/system/bin/noxscreen",
+            "/system/bin/noxspeedup",
+            "/system/bin/enable_nox",
+            "/data/property/persist.nox.simulator_version",
+            "/data/misc/profiles/ref/com.bignox.app.store.hd",
+            "/data/misc/profiles/ref/com.bignox.google.installer"
+    };
+
+    // Rockchip-based device paths (cloud phone/emulator indicator from sgmain)
+    private static final String[] ROCKCHIP_PATHS = {
+            "/sys/bus/platform/driver/rockchip-system-monitor",
+            "/sys/bus/platform/driver/rockchip-nocp",
+            "/sys/bus/platform/driver/rockchip-pm",
+            "/sys/bus/platform/driver/rockchip-pcie",
+            "/sys/bus/platform/driver/rockchip-pinctrl",
+            "/sys/bus/platform/driver/dwmmc_rockchip",
+            "/sys/bus/nvmem/deivces/rockchip-otp0",
+            "/sys/devices/platform/rockchip-system-monitor",
+            "/sys/module/nvmem_rockchip_otp",
+            "/sys/module/nvmem_rockchip_otp/parameters/rockchip_otp_wr_magic",
+            "/sys/module/rockchip_pwm_remotectl",
+            "/sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl",
+            "/proc/irq/69/rockchip_thermal",
+            "/proc/irq/19/rockchip_usb2phy",
+            "/vendor/etc/init/hw/init.rockchip.rc",
+            "/vendor/etc/init/init.rockchip.drmservice.rc",
+            "/vendor/bin/rockchip.drmservice"
+    };
+
+    // Other emulator-specific paths (Droid4X, MEmu, BlueStacks deep, ttVM)
+    private static final String[] OTHER_EMULATOR_PATHS = {
+            "/system/bin/droid4x",
+            "/system/bin/droid4x-prop",
+            "/system/lib/libdroid4x.so",
+            "/system/lib/libmicrovirt.so",
+            "/system/bin/microvirt-prop",
+            "/data/data/com.microvirt.market",
+            "/data/data/com.microvirt.launcher",
+            "/data/data/com.microvirt.installe",
+            "/data/data/com.bluestacks.appmart",
+            "/data/data/com.bluestacks.home",
+            "/data/bluestacks.prop",
+            "/data/.bluestacks.prop",
+            "/system/bin/ttVM-vbox-sf"
+    };
+
+    // CPU frequency paths for emulator detection
+    private static final String CPU_FREQ_PATH = "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq";
 
     public EmulatorDetector(Context context) {
         this.context = context;
@@ -176,7 +279,248 @@ public class EmulatorDetector {
         items.add(detectVirtualMachine());
         items.add(detectMultiInstance());
         items.add(detectCloudPhone());
+        items.add(detectRedroid());
+        items.add(detectVirtualBoxDeep());
+        items.add(detectNoxDeep());
+        items.add(detectRockchip());
+        items.add(detectCpuFrequency());
         return items;
+    }
+
+    /**
+     * Detect Redroid (Docker-based Android cloud phone) - 2024 new
+     * Based on sgmain SecGuard heap dump
+     */
+    public DetectionItem detectRedroid() {
+        DetectionItem item = new DetectionItem("Redroid 云手机", "检测 Docker 安卓云手机 (Redroid)");
+
+        boolean detected = false;
+
+        // Check Redroid system properties
+        for (String prop : REDROID_PROPERTIES) {
+            try {
+                String val = null;
+                if (prop.startsWith("init.svc.")) {
+                    val = System.getProperty(prop);
+                } else {
+                    // Use native property read
+                    val = nativeDetector.getSystemProperty(prop);
+                }
+                if (val != null && !val.isEmpty()) {
+                    detected = true;
+                    item.addDetectionDetail("🐳 Redroid 属性", prop, "值: " + val, DetectionLayer.JAVA, "☁️");
+                }
+            } catch (Exception ignored) {}
+        }
+
+        item.setLayerResult(DetectionLayer.JAVA, detected);
+        item.setLayerResult(DetectionLayer.NATIVE, detected);
+        item.setLayerResult(DetectionLayer.SYSCALL, detected);
+
+        if (detected) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到 Redroid Docker 云手机环境");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到");
+        }
+        return item;
+    }
+
+    /**
+     * Detect VirtualBox deep features (23 paths from sgmain)
+     */
+    public DetectionItem detectVirtualBoxDeep() {
+        DetectionItem item = new DetectionItem("VirtualBox 深度", "深度检测 VirtualBox 虚拟机特征");
+
+        boolean javaDetected = false;
+        boolean nativeDetected = false;
+        int hitCount = 0;
+
+        for (String path : VBOX_PATHS) {
+            if (new java.io.File(path).exists()) {
+                javaDetected = true;
+                hitCount++;
+                if (hitCount <= 5) {
+                    item.addDetectionDetail("📁 VBox 路径", path, "文件存在", DetectionLayer.JAVA, "📂");
+                }
+            }
+            if (nativeDetector.fileExistsNative(path)) {
+                nativeDetected = true;
+            }
+        }
+
+        if (hitCount > 5) {
+            item.addDetectionDetail("📊 统计", "VBox 命中", hitCount + " 个路径命中", DetectionLayer.JAVA, "📈");
+        }
+
+        item.setLayerResult(DetectionLayer.JAVA, javaDetected);
+        item.setLayerResult(DetectionLayer.NATIVE, nativeDetected);
+        item.setLayerResult(DetectionLayer.SYSCALL, nativeDetected);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到 VirtualBox 虚拟机 (" + hitCount + " 处特征)");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到");
+        }
+        return item;
+    }
+
+    /**
+     * Detect Nox emulator deep features (11 paths from sgmain)
+     */
+    public DetectionItem detectNoxDeep() {
+        DetectionItem item = new DetectionItem("夜神深度检测", "深度检测夜神模拟器特征");
+
+        boolean javaDetected = false;
+        boolean nativeDetected = false;
+        int hitCount = 0;
+
+        for (String path : NOX_PATHS) {
+            if (new java.io.File(path).exists()) {
+                javaDetected = true;
+                hitCount++;
+                item.addDetectionDetail("📁 Nox 路径", path, "文件存在", DetectionLayer.JAVA, "📂");
+            }
+            if (nativeDetector.fileExistsNative(path)) {
+                nativeDetected = true;
+            }
+        }
+
+        // Also check other emulator paths
+        for (String path : OTHER_EMULATOR_PATHS) {
+            if (new java.io.File(path).exists()) {
+                javaDetected = true;
+                hitCount++;
+                item.addDetectionDetail("📁 模拟器路径", path, "文件存在", DetectionLayer.JAVA, "📂");
+            }
+        }
+
+        // Check nox service property
+        try {
+            String noxSvc = System.getProperty("init.svc.noxd");
+            if (noxSvc != null && !noxSvc.isEmpty()) {
+                javaDetected = true;
+                item.addDetectionDetail("⚙️ Nox 服务", "init.svc.noxd", "值: " + noxSvc, DetectionLayer.JAVA, "🔧");
+            }
+        } catch (Exception ignored) {}
+
+        item.setLayerResult(DetectionLayer.JAVA, javaDetected);
+        item.setLayerResult(DetectionLayer.NATIVE, nativeDetected);
+        item.setLayerResult(DetectionLayer.SYSCALL, nativeDetected);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到夜神/模拟器特征 (" + hitCount + " 处)");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到");
+        }
+        return item;
+    }
+
+    /**
+     * Detect Rockchip-based cloud phone/emulator (17 paths from sgmain)
+     */
+    public DetectionItem detectRockchip() {
+        DetectionItem item = new DetectionItem("Rockchip 云手机", "检测 Rockchip 芯片云手机特征");
+
+        boolean detected = false;
+        int hitCount = 0;
+
+        for (String path : ROCKCHIP_PATHS) {
+            if (new java.io.File(path).exists()) {
+                detected = true;
+                hitCount++;
+                if (hitCount <= 5) {
+                    item.addDetectionDetail("📁 Rockchip", path, "文件存在", DetectionLayer.JAVA, "📂");
+                }
+            }
+        }
+
+        if (hitCount > 5) {
+            item.addDetectionDetail("📊 统计", "Rockchip 命中", hitCount + " 个路径命中", DetectionLayer.JAVA, "📈");
+        }
+
+        item.setLayerResult(DetectionLayer.JAVA, detected);
+        item.setLayerResult(DetectionLayer.NATIVE, detected);
+        item.setLayerResult(DetectionLayer.SYSCALL, detected);
+
+        if (detected) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到 Rockchip 云手机特征 (" + hitCount + " 处)");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未检测到");
+        }
+        return item;
+    }
+
+    /**
+     * Detect emulator via CPU frequency analysis (sgmain stage 10)
+     * Real devices have varying frequencies; emulators often have fixed/zero values
+     */
+    public DetectionItem detectCpuFrequency() {
+        DetectionItem item = new DetectionItem("CPU 频率分析", "通过 CPU 频率检测模拟器");
+
+        boolean detected = false;
+        int cpuCount = Runtime.getRuntime().availableProcessors();
+        int zeroCount = 0;
+        int readableCount = 0;
+        long lastFreq = -1;
+        boolean allSame = true;
+
+        for (int i = 0; i < Math.min(cpuCount, 8); i++) {
+            String path = String.format(CPU_FREQ_PATH, i);
+            try {
+                java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(path));
+                String line = reader.readLine();
+                reader.close();
+
+                if (line != null) {
+                    readableCount++;
+                    long freq = Long.parseLong(line.trim());
+                    if (freq == 0) {
+                        zeroCount++;
+                    }
+                    if (lastFreq >= 0 && freq != lastFreq) {
+                        allSame = false;
+                    }
+                    lastFreq = freq;
+                    item.addDetectionDetail("📊 CPU" + i + " 频率",
+                        String.format("%d KHz", freq),
+                        path, DetectionLayer.JAVA, "⚡");
+                }
+            } catch (Exception ignored) {
+                // Can't read = might be emulator or permission issue
+            }
+        }
+
+        // Heuristic: all zero or all identical = suspicious
+        if (readableCount > 0 && (zeroCount == readableCount || (allSame && readableCount > 1))) {
+            detected = true;
+        }
+
+        // Can't read any CPU freq = very suspicious
+        if (readableCount == 0 && cpuCount > 0) {
+            detected = true;
+            item.addDetectionDetail("⚠️ CPU 频率", "无法读取", "所有 CPU 频率不可读", DetectionLayer.JAVA, "❌");
+        }
+
+        item.setLayerResult(DetectionLayer.JAVA, detected);
+        item.setLayerResult(DetectionLayer.NATIVE, detected);
+        item.setLayerResult(DetectionLayer.SYSCALL, detected);
+
+        if (detected) {
+            item.setStatus(DetectionStatus.WARNING);
+            item.setDetail("CPU 频率异常 (可能是模拟器)");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail(String.format("已检测 %d 个 CPU 核心频率正常", readableCount));
+        }
+        return item;
     }
 
     // ===================== Java Layer Methods =====================

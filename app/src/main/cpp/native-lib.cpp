@@ -1980,6 +1980,11 @@ static std::string compute_hosts_hash(bool use_syscall) {
         std::string content = use_syscall
             ? syscall_read_file(path, 16384)
             : read_file_native(path, 16384);
+        // Normalize: remove \r, trim trailing whitespace for consistent cross-layer hashing
+        content.erase(std::remove(content.begin(), content.end(), '\r'), content.end());
+        while (!content.empty() && (content.back() == '\n' || content.back() == ' ' || content.back() == '\t')) {
+            content.pop_back();
+        }
         if (!content.empty()) {
             uint32_t hash = simple_hash(content);
             char buf[16];
