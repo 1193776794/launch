@@ -114,7 +114,7 @@ public class EmulatorDetector {
             "/sys/bus/platform/driver/rockchip-pcie",
             "/sys/bus/platform/driver/rockchip-pinctrl",
             "/sys/bus/platform/driver/dwmmc_rockchip",
-            "/sys/bus/nvmem/deivces/rockchip-otp0",
+            "/sys/bus/nvmem/devices/rockchip-otp0",
             "/sys/devices/platform/rockchip-system-monitor",
             "/sys/module/nvmem_rockchip_otp",
             "/sys/module/nvmem_rockchip_otp/parameters/rockchip_otp_wr_magic",
