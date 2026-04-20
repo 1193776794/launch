@@ -111,6 +111,7 @@
     <string name="detect_debugger">调试器连接</string>
     <string name="detect_jdwp">JDWP 检测</string>
     <string name="detect_ptrace">Ptrace 检测</string>
+    <string name="detect_suspicious_tool_paths">可疑工具路径</string>
 
     <!-- Fingerprint -->
     <string name="fingerprint_title">设备指纹信息</string>

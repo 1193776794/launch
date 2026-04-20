@@ -83,6 +83,14 @@ public class NativeDetector {
 
     public native int getTracerPid();
 
+    // Suspicious tool path detection
+    /** Check suspicious tool paths - Native layer (access) */
+    public native boolean checkSuspiciousToolPathsNative();
+    /** Check suspicious tool paths - Syscall layer */
+    public native boolean checkSuspiciousToolPathsSyscall();
+    /** Get detected suspicious tool path details (JSON format) */
+    public native String getDetectedSuspiciousToolPaths();
+
     // ===================== File Operations =====================
 
     public native boolean fileExistsNative(String path);

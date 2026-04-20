@@ -292,6 +292,23 @@ Java_com_xff_launch_detector_NativeDetector_getTracerPid(JNIEnv *env, jobject th
     return DebugDetector::getTracerPid();
 }
 
+// Suspicious tool path detection
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkSuspiciousToolPathsNative(JNIEnv *env, jobject thiz) {
+    return DebugDetector::checkSuspiciousToolPathsNative();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkSuspiciousToolPathsSyscall(JNIEnv *env, jobject thiz) {
+    return DebugDetector::checkSuspiciousToolPathsSyscall();
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getDetectedSuspiciousToolPaths(JNIEnv *env, jobject thiz) {
+    std::string details = DebugDetector::getDetectedSuspiciousToolPaths();
+    return env->NewStringUTF(details.c_str());
+}
+
 // ===================== File Operations via Syscall =====================
 
 JNIEXPORT jboolean JNICALL
