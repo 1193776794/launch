@@ -2295,7 +2295,10 @@ public class HookDetector {
                 String lowerLine = line.toLowerCase();
                 if (lowerLine.contains("frida") ||
                     lowerLine.contains("gum-js-loop") ||
-                    lowerLine.contains("frida-agent")) {
+                    lowerLine.contains("frida-agent") ||
+                    lowerLine.contains("frida-agent-32") ||
+                    lowerLine.contains("frida-agent-64") ||
+                    lowerLine.contains("linjector")) {
                     fridaMaps++;
                     if (fridaMaps <= 3) {
                         String[] parts = line.split("\\s+");
@@ -2333,11 +2336,48 @@ public class HookDetector {
                                 (threadName.contains("gmain") ||
                                  threadName.contains("gdbus") ||
                                  threadName.contains("gum-js-loop") ||
-                                 threadName.contains("pool-frida"))) {
+                                 threadName.contains("pool-frida") ||
+                                 threadName.contains("linjector"))) {
                                 item.addDetectionDetail("🧵 Frida 线程", threadName,
                                     "TID: " + task.getName() + "\n线程名: " + threadName,
                                     DetectionLayer.NATIVE, "🔗");
                             }
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        // 检测 /proc/net/tcp 中的 Frida/IDA 端口 (十六进制扫描)
+        try {
+            java.io.BufferedReader reader = new java.io.BufferedReader(
+                new java.io.FileReader("/proc/net/tcp"));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                // Frida 默认端口 27042 = 0x69A2
+                if (line.contains(":69A2") || line.contains(":69A3")) {
+                    item.addDetectionDetail("🌐 Frida TCP 端口", "/proc/net/tcp",
+                        "检测到 Frida 端口 (十六进制扫描): " + line.trim(),
+                        DetectionLayer.JAVA, "🔌");
+                }
+            }
+            reader.close();
+        } catch (Exception ignored) {
+        }
+
+        // 检测 FD 中的 linjector (Frida 注入器管道)
+        try {
+            java.io.File fdDir = new java.io.File("/proc/self/fd");
+            String[] fds = fdDir.list();
+            if (fds != null) {
+                for (String fd : fds) {
+                    try {
+                        String target = nativeDetector.readlinkSyscall("/proc/self/fd/" + fd);
+                        if (target != null && target.contains("linjector")) {
+                            item.addDetectionDetail("📁 Frida 注入器", "FD linjector",
+                                "FD " + fd + " -> " + target,
+                                DetectionLayer.SYSCALL, "💉");
                         }
                     } catch (Exception ignored) {}
                 }

@@ -164,12 +164,14 @@ Java_com_xff_launch_detector_NativeDetector_checkXposedSyscall(JNIEnv *env, jobj
 JNIEXPORT jboolean JNICALL
 Java_com_xff_launch_detector_NativeDetector_checkFridaNative(JNIEnv *env, jobject thiz) {
     return HookDetector::checkFridaNative() || HookDetector::checkFridaPortsNative() ||
-           HookDetector::checkFridaMemoryNative() || HookDetector::checkFridaThreads();
+           HookDetector::checkFridaMemoryNative() || HookDetector::checkFridaThreads() ||
+           HookDetector::checkFridaPortTcpNative();
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_xff_launch_detector_NativeDetector_checkFridaSyscall(JNIEnv *env, jobject thiz) {
-    return HookDetector::checkFridaSyscall() || HookDetector::checkFridaMemorySyscall();
+    return HookDetector::checkFridaSyscall() || HookDetector::checkFridaMemorySyscall() ||
+           HookDetector::checkFridaPortTcpSyscall() || HookDetector::checkFridaFdLinjectorSyscall();
 }
 
 JNIEXPORT jboolean JNICALL
@@ -244,6 +246,33 @@ Java_com_xff_launch_detector_NativeDetector_checkZygiskNative(JNIEnv *env, jobje
 JNIEXPORT jboolean JNICALL
 Java_com_xff_launch_detector_NativeDetector_checkZygiskSyscall(JNIEnv *env, jobject thiz) {
     return HookDetector::checkZygiskSyscall();
+}
+
+// /proc/net/tcp port scanning (IDA & Frida)
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkIdaPortTcpNative(JNIEnv *env, jobject thiz) {
+    return HookDetector::checkIdaPortTcpNative();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkIdaPortTcpSyscall(JNIEnv *env, jobject thiz) {
+    return HookDetector::checkIdaPortTcpSyscall();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkFridaPortTcpNative(JNIEnv *env, jobject thiz) {
+    return HookDetector::checkFridaPortTcpNative();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkFridaPortTcpSyscall(JNIEnv *env, jobject thiz) {
+    return HookDetector::checkFridaPortTcpSyscall();
+}
+
+// Frida FD linjector detection
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkFridaFdLinjectorSyscall(JNIEnv *env, jobject thiz) {
+    return HookDetector::checkFridaFdLinjectorSyscall();
 }
 
 // ===================== Emulator Detection =====================
@@ -325,9 +354,9 @@ static const char* SUSPICIOUS_KEYWORDS[] = {
     "magisk", "su", "supersu", "superuser", "busybox",
     "ksu", "kernelsu", "apatch", "lsposed", "edxposed",
     "xposed", "riru", "zygisk", "shamiko", "hide",
-    "frida", "substrate", "cydia"
+    "frida", "substrate", "cydia", "linjector"
 };
-static const int SUSPICIOUS_KEYWORDS_COUNT = 18;
+static const int SUSPICIOUS_KEYWORDS_COUNT = 19;
 
 static bool contains_suspicious(const std::string& path) {
     if (path.empty()) return false;
