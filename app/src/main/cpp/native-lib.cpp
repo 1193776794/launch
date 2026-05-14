@@ -2158,6 +2158,258 @@ Java_com_xff_launch_detector_NativeDetector_checkPropertyMmapConsistency(JNIEnv 
     return mismatch;
 }
 
+// --- /dev/__properties__ Direct Binary mmap Read ---
+//
+// Bionic 的属性服务以 trie 结构把每条属性记录组织在 /dev/__properties__ 下的
+// per-context 文件里 (u:object_r:<ctx>:s0)。每条 prop_info 记录的二进制布局：
+//   uint32_t serial                 // 高位 flags，bit 16 (0x10000) 表示 hidden/pending
+//   char     value[DEV_PROP_VALUE_MAX]  // 92 字节，null 结尾
+//   char     name[]                 // 变长 key，null 结尾
+// 文件头 44 字节：4 ints (serial / reserved / magic 'PROP' / version) + 28 bytes reserved。
+//
+// 通过 syscall_open + mmap 直接读 prop_info 内存，可以同时绕过：
+//  · Java 层 SystemProperties.get() / Settings 的 hook
+//  · libc 中 __system_property_get / __system_property_find 的 inline hook
+// 仅 mmap 系统调用 + 字节扫描即可拿到真值。
+
+static constexpr uint32_t PROP_FILE_MAGIC = 0x504F5250u;  // 'P','R','O','P' (LE)
+// AOSP 实际使用 0xFC6ED0AB；JD c.java 里写的 0xFC6ED0CB 是另一个 fork 的值。两个都允许。
+static constexpr uint32_t PROP_AREA_VERSION_A = 0xFC6ED0ABu;
+static constexpr uint32_t PROP_AREA_VERSION_B = 0xFC6ED0CBu;
+static constexpr size_t PROP_HEADER_SIZE = 44;            // 4 ints + 28 reserved
+static constexpr size_t DEV_PROP_VALUE_MAX = 92;
+
+static std::string scan_property_area(const uint8_t* data, size_t size, const std::string& key) {
+    if (size < PROP_HEADER_SIZE + 96 + key.size() + 1) return "";
+
+    uint32_t magic = 0, version = 0;
+    memcpy(&magic, data + 8, 4);
+    memcpy(&version, data + 12, 4);
+    if (magic != PROP_FILE_MAGIC) return "";
+    if (version != PROP_AREA_VERSION_A && version != PROP_AREA_VERSION_B) return "";
+
+    const uint8_t* body = data + PROP_HEADER_SIZE;
+    size_t body_size = size - PROP_HEADER_SIZE;
+    const uint8_t* needle = reinterpret_cast<const uint8_t*>(key.data());
+    size_t needle_len = key.size();
+
+    if (body_size < needle_len + 96) return "";
+
+    for (size_t i = 96; i + needle_len < body_size; i++) {
+        if (body[i] != needle[0]) continue;                       // fast path
+        if (memcmp(body + i, needle, needle_len) != 0) continue;
+        if (body[i + needle_len] != 0) continue;                  // exact key match
+
+        uint32_t flags = 0;
+        memcpy(&flags, body + i - 96, 4);
+        if ((flags & 0x10000u) != 0) continue;                    // hidden/pending
+
+        const uint8_t* val_start = body + i - DEV_PROP_VALUE_MAX;
+        size_t val_len = 0;
+        while (val_len < DEV_PROP_VALUE_MAX && val_start[val_len] != 0) val_len++;
+        return std::string(reinterpret_cast<const char*>(val_start), val_len);
+    }
+    return "";
+}
+
+// untrusted_app 通常允许直接 open /dev/__properties__/u:object_r:<ctx>:s0 文件，
+// 但 readdir(/dev/__properties__) 会被 SELinux 拒。所以做两步：
+//   1) 试图 getdents 枚举（root/system_app 可能可以）
+//   2) 列举失败或没有结果时，回退到一份已知 context 名单逐个 try-open。
+static const char* const KNOWN_PROP_CONTEXTS_C[] = {
+        "u:object_r:default_prop:s0",
+        "u:object_r:exported_default_prop:s0",
+        "u:object_r:exported2_default_prop:s0",
+        "u:object_r:exported3_default_prop:s0",
+        "u:object_r:exported_secure_prop:s0",
+        "u:object_r:exported_system_prop:s0",
+        "u:object_r:public_readable_default_prop:s0",
+        "u:object_r:userdebug_or_eng_prop:s0",
+        "u:object_r:safemode_prop:s0",
+        "u:object_r:build_prop:s0",
+        "u:object_r:exported_secure_default_prop:s0",
+        "u:object_r:system_prop:s0",
+        "u:object_r:vendor_default_prop:s0",
+        "u:object_r:vendor_security_patch_level_prop:s0",
+        "u:object_r:init_service_status_prop:s0",
+        "u:object_r:init_service_status_private_prop:s0",
+        "u:object_r:debug_prop:s0",
+        "u:object_r:exported_debug_prop:s0",
+        "u:object_r:debuggerd_prop:s0",
+        "u:object_r:device_logging_prop:s0",
+        "u:object_r:usb_prop:s0",
+        "u:object_r:usb_control_prop:s0",
+        "u:object_r:adbd_prop:s0",
+        "u:object_r:adbd_config_prop:s0",
+        "u:object_r:adb_prop:s0",
+        "u:object_r:adb_service_prop:s0",
+        "u:object_r:ctl_adbd_prop:s0",
+        "u:object_r:ffs_prop:s0",
+        "u:object_r:bootloader_prop:s0",
+        "u:object_r:dalvik_config_prop:s0",
+        "u:object_r:exported_dalvik_prop:s0",
+        "u:object_r:dalvik_prop:s0",
+};
+
+static std::string scan_file_for_key(const std::string& path, const std::string& key) {
+    int fd = syscall_open(path.c_str(), O_RDONLY);
+    if (fd < 0) return "";
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || st.st_size <= (off_t)PROP_HEADER_SIZE) {
+        syscall_close(fd);
+        return "";
+    }
+    void* mapped = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    syscall_close(fd);
+    if (mapped == MAP_FAILED) return "";
+    std::string val = scan_property_area(
+            static_cast<const uint8_t*>(mapped),
+            static_cast<size_t>(st.st_size),
+            key);
+    munmap(mapped, st.st_size);
+    return val;
+}
+
+static std::string read_dev_property_mmap(const std::string& key) {
+    const char* root_path = "/dev/__properties__";
+
+    // 旧版 Android（pre-O）属性区是单文件 —— 直接 try open。
+    {
+        std::string val = scan_file_for_key(root_path, key);
+        if (!val.empty()) return val;
+    }
+
+    // 尝试 getdents 枚举所有 context 文件（root/system_app 通常允许）
+    char buffer[8192];
+    int n = syscall_getdents(root_path, buffer, sizeof(buffer));
+    if (n > 0) {
+        int pos = 0;
+        while (pos < n) {
+            auto* d = reinterpret_cast<linux_dirent64*>(buffer + pos);
+            if (d->d_reclen == 0) break;
+            const char* nm = d->d_name;
+            if (nm[0] != '.' || (nm[1] != '\0' && (nm[1] != '.' || nm[2] != '\0'))) {
+                std::string val = scan_file_for_key(std::string(root_path) + "/" + nm, key);
+                if (!val.empty()) return val;
+            }
+            pos += d->d_reclen;
+        }
+    }
+
+    // Fallback：untrusted_app readdir 被拒时，按已知 context 名字逐个 try-open
+    for (const char* ctx : KNOWN_PROP_CONTEXTS_C) {
+        std::string val = scan_file_for_key(std::string(root_path) + "/" + ctx, key);
+        if (!val.empty()) return val;
+    }
+
+    return "";
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_readDevPropertyMmap(
+        JNIEnv* env, jobject /*thiz*/, jstring propName) {
+    if (propName == nullptr) return env->NewStringUTF("");
+    const char* name = env->GetStringUTFChars(propName, nullptr);
+    if (name == nullptr) return env->NewStringUTF("");
+    std::string val = read_dev_property_mmap(name);
+    env->ReleaseStringUTFChars(propName, name);
+    return env->NewStringUTF(val.c_str());
+}
+
+// 直接读指定 SELinux context 的属性文件，例如 u:object_r:debug_prop:s0 / usb_prop:s0。
+// ADB/调试开关绝大多数都在 debug_prop / usb_prop / adbd_prop 这几个上下文里，定向读比全目录
+// 扫描快、且能避免不同 context 同名键的误匹配。
+static std::string read_property_from_context(const std::string& key, const std::string& ctx_name) {
+    std::string path = "/dev/__properties__/u:object_r:" + ctx_name + ":s0";
+    int fd = syscall_open(path.c_str(), O_RDONLY);
+    if (fd < 0) return "";
+    // 使用 fstat(fd) 而非 stat(path)。untrusted_app 通常允许 open 这些 prop_file，但
+    // 路径维度的 stat/readdir 可能被 SELinux 拒。fstat 走 fd 检查，能继续工作。
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || st.st_size <= (off_t)PROP_HEADER_SIZE) {
+        syscall_close(fd);
+        return "";
+    }
+    void* mapped = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    syscall_close(fd);
+    if (mapped == MAP_FAILED) return "";
+    std::string val = scan_property_area(
+            static_cast<const uint8_t*>(mapped),
+            static_cast<size_t>(st.st_size),
+            key);
+    munmap(mapped, st.st_size);
+    return val;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_readPropertyFromContext(
+        JNIEnv* env, jobject /*thiz*/, jstring jKey, jstring jContext) {
+    if (jKey == nullptr || jContext == nullptr) return env->NewStringUTF("");
+    const char* key = env->GetStringUTFChars(jKey, nullptr);
+    const char* ctx = env->GetStringUTFChars(jContext, nullptr);
+    std::string val;
+    if (key != nullptr && ctx != nullptr) {
+        val = read_property_from_context(key, ctx);
+    }
+    if (key != nullptr) env->ReleaseStringUTFChars(jKey, key);
+    if (ctx != nullptr) env->ReleaseStringUTFChars(jContext, ctx);
+    return env->NewStringUTF(val.c_str());
+}
+
+// 诊断函数：对 /dev/__properties__ 下所有已知 context 文件依次尝试 openat，
+// 返回每条路径的状态（ok / errno 名）。让用户看清楚到底是没文件还是被 SELinux 拒。
+// 注意：ARM64 的 syscall_open 用 inline svc，不写 libc errno，需要直接读 syscall_raw 返回值。
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_probeDevPropertyAccess(
+        JNIEnv* env, jobject /*thiz*/) {
+    std::string out;
+    auto errno_name = [](int e) -> const char* {
+        switch (e) {
+            case EACCES: return "EACCES";
+            case EPERM:  return "EPERM";
+            case ENOENT: return "ENOENT";
+            case EISDIR: return "EISDIR";
+            case ENOTDIR:return "ENOTDIR";
+            case EMFILE: return "EMFILE";
+            case ENFILE: return "ENFILE";
+            case ENAMETOOLONG: return "ENAMETOOLONG";
+            default:     return "ERR";
+        }
+    };
+    auto try_open = [&](const char* path, int extraFlags, const char* tag) {
+        long rc = syscall_raw(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | extraFlags, 0);
+        if (rc >= 0) {
+            struct stat st{};
+            long size = -1;
+            if (fstat((int)rc, &st) == 0) size = (long)st.st_size;
+            syscall_close((int)rc);
+            out += "[ok ] ";
+            out += tag;
+            out += " size=";
+            out += std::to_string(size);
+            out += "\n";
+        } else {
+            int err = (int)(-rc);
+            out += "[err] ";
+            out += tag;
+            out += ": ";
+            out += errno_name(err);
+            out += "(";
+            out += std::to_string(err);
+            out += ")\n";
+        }
+    };
+
+    try_open("/dev/__properties__", O_DIRECTORY, "/dev/__properties__ (dir)");
+    try_open("/dev/__properties__", 0,           "/dev/__properties__ (file)");
+    for (const char* ctx : KNOWN_PROP_CONTEXTS_C) {
+        std::string path = "/dev/__properties__/";
+        path += ctx;
+        try_open(path.c_str(), 0, ctx);
+    }
+    return env->NewStringUTF(out.c_str());
+}
+
 // --- /dev/urandom Integrity Check ---
 
 static std::string read_urandom_hex(bool use_syscall) {

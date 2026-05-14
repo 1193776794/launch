@@ -379,6 +379,26 @@ public class NativeDetector {
     /** Read system property via direct mmap of build.prop files (bypasses __system_property_get) */
     public native String getPropertyMmap(String propName);
 
+    /**
+     * Read system property via direct mmap of /dev/__properties__ binary area.
+     * Bypasses both Java SystemProperties hooks AND libc __system_property_get inline hooks.
+     * Uses syscall_open + mmap to access bionic property area at the kernel boundary.
+     */
+    public native String readDevPropertyMmap(String propName);
+
+    /**
+     * Read property from a specific SELinux context file:
+     *   /dev/__properties__/u:object_r:&lt;contextName&gt;:s0
+     * 用于精准命中 debug_prop / usb_prop / adbd_prop 这类承载 ADB / 调试开关的 context 文件。
+     */
+    public native String readPropertyFromContext(String key, String contextName);
+
+    /**
+     * Diagnostic probe: try openat() on /dev/__properties__ and every known context file.
+     * Returns multi-line text listing each path with either "ok size=N" or "err ERRNAME(N)".
+     */
+    public native String probeDevPropertyAccess();
+
     /** Compare mmap vs __system_property_get for 5 key properties, returns mismatch count */
     public native int checkPropertyMmapConsistency();
 
