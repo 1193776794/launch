@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace 'com.xff.launch'
-    compileSdk 36
+    compileSdk 35
     applicationVariants.all { variant ->
         variant.outputs.all { output ->
             def sourceFile = "app-${variant.buildType.name}"
@@ -16,7 +16,7 @@ android {
     defaultConfig {
         applicationId "com.xff.launch"
         minSdk 28
-        targetSdk 36
+        targetSdk 35
         versionCode 116
         versionName "1.1.6"
 

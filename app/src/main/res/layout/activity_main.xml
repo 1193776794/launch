@@ -15,7 +15,7 @@
         android:background="?attr/colorSurface"
         android:elevation="0dp"
         app:layout_constraintTop_toTopOf="parent"
-        app:title="@string/app_name"
+        app:title="检测工具"
         app:titleTextAppearance="@style/TextAppearance.Material3.TitleLarge"
         app:titleTextColor="?attr/colorOnSurface">
 

@@ -12,6 +12,11 @@
 #include <sys/vfs.h>
 #include <sys/utsname.h>
 #include <sys/syscall.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <algorithm>
 #include <vector>
 #include <set>
@@ -2003,6 +2008,245 @@ Java_com_xff_launch_detector_NativeDetector_getHostsHashNative(JNIEnv *env, jobj
 JNIEXPORT jstring JNICALL
 Java_com_xff_launch_detector_NativeDetector_getHostsHashSyscall(JNIEnv *env, jobject thiz) {
     return env->NewStringUTF(compute_hosts_hash(true).c_str());
+}
+
+// --- VPN Native Interface Signals ---
+
+static bool is_vpn_interface_name_c(const char* name) {
+    if (name == nullptr || name[0] == '\0') return false;
+    char lower[IFNAMSIZ + 1]{};
+    size_t i = 0;
+    for (; i < IFNAMSIZ && name[i] != '\0'; i++) {
+        lower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(name[i])));
+    }
+    lower[i] = '\0';
+    return strncmp(lower, "tun", 3) == 0 ||
+           strncmp(lower, "tap", 3) == 0 ||
+           strncmp(lower, "ppp", 3) == 0 ||
+           strncmp(lower, "wg", 2) == 0 ||
+           strncmp(lower, "ipsec", 5) == 0 ||
+           strncmp(lower, "vpn", 3) == 0 ||
+           strstr(lower, "vpn") != nullptr;
+}
+
+static void append_hex_flags(std::string& out, unsigned int flags) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "0x%x", flags);
+    out += buf;
+}
+
+static std::string format_ipv4_sockaddr(const struct sockaddr* addr) {
+    if (addr == nullptr || addr->sa_family != AF_INET) return "";
+    const auto* in = reinterpret_cast<const struct sockaddr_in*>(addr);
+    char buf[INET_ADDRSTRLEN] = {0};
+    if (inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf)) == nullptr) return "";
+    return buf;
+}
+
+static std::string query_iface_ipv4(int sock, const char* name) {
+    if (sock < 0 || name == nullptr || name[0] == '\0') return "";
+    struct ifreq req{};
+    strncpy(req.ifr_name, name, IFNAMSIZ - 1);
+    if (ioctl(sock, SIOCGIFADDR, &req) != 0) return "";
+    return format_ipv4_sockaddr(&req.ifr_addr);
+}
+
+static std::string collect_vpn_native_signals() {
+    std::string out;
+    bool detected = false;
+
+    out += "ioctl.scan=start\n";
+    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (sock < 0) {
+        out += "ioctl.error=socket errno=" + std::to_string(errno) + "\n";
+    } else {
+        char buffer[16384]{};
+        struct ifconf ifc{};
+        ifc.ifc_len = sizeof(buffer);
+        ifc.ifc_buf = buffer;
+
+        if (ioctl(sock, SIOCGIFCONF, &ifc) != 0) {
+            out += "ioctl.error=SIOCGIFCONF errno=" + std::to_string(errno) + "\n";
+        } else {
+            int count = ifc.ifc_len / static_cast<int>(sizeof(struct ifreq));
+            out += "ioctl.SIOCGIFCONF.count=" + std::to_string(count) + "\n";
+            auto* ifr = reinterpret_cast<struct ifreq*>(buffer);
+            for (int i = 0; i < count; i++) {
+                const char* name = ifr[i].ifr_name;
+                if (!is_vpn_interface_name_c(name)) continue;
+
+                struct ifreq req{};
+                strncpy(req.ifr_name, name, IFNAMSIZ - 1);
+
+                bool up = false;
+                unsigned int flags = 0;
+                int mtu = -1;
+                int index = -1;
+                std::string ipv4Address;
+                std::string resolvedName;
+
+                if (ioctl(sock, SIOCGIFFLAGS, &req) == 0) {
+                    flags = static_cast<unsigned int>(req.ifr_flags);
+                    up = (req.ifr_flags & IFF_UP) != 0;
+                }
+
+                memset(&req, 0, sizeof(req));
+                strncpy(req.ifr_name, name, IFNAMSIZ - 1);
+                if (ioctl(sock, SIOCGIFMTU, &req) == 0) {
+                    mtu = req.ifr_mtu;
+                }
+
+                memset(&req, 0, sizeof(req));
+                strncpy(req.ifr_name, name, IFNAMSIZ - 1);
+                if (ioctl(sock, SIOCGIFINDEX, &req) == 0) {
+                    index = req.ifr_ifindex;
+                    struct ifreq nameReq{};
+                    nameReq.ifr_ifindex = index;
+                    if (ioctl(sock, SIOCGIFNAME, &nameReq) == 0) {
+                        resolvedName = nameReq.ifr_name;
+                    }
+                }
+
+                ipv4Address = query_iface_ipv4(sock, name);
+
+                if (up) detected = true;
+                out += "ioctl.if=";
+                out += name;
+                out += " up=" + std::to_string(up ? 1 : 0);
+                out += " flags=";
+                append_hex_flags(out, flags);
+                out += " mtu=" + std::to_string(mtu);
+                out += " index=" + std::to_string(index);
+                if (!ipv4Address.empty()) {
+                    out += " addr=" + ipv4Address;
+                }
+                if (!resolvedName.empty()) {
+                    out += " resolved=" + resolvedName;
+                }
+                out += "\n";
+            }
+        }
+
+        out += "if_nameindex.scan=start\n";
+        struct if_nameindex* ifs = if_nameindex();
+        if (ifs == nullptr) {
+            out += "if_nameindex.error=errno=" + std::to_string(errno) + "\n";
+        } else {
+            for (struct if_nameindex* current = ifs;
+                 current->if_index != 0 && current->if_name != nullptr;
+                 current++) {
+                const char* name = current->if_name;
+                if (!is_vpn_interface_name_c(name)) continue;
+
+                struct ifreq req{};
+                strncpy(req.ifr_name, name, IFNAMSIZ - 1);
+                bool up = false;
+                unsigned int flags = 0;
+                if (ioctl(sock, SIOCGIFFLAGS, &req) == 0) {
+                    flags = static_cast<unsigned int>(req.ifr_flags);
+                    up = (req.ifr_flags & IFF_UP) != 0;
+                }
+                if (up) detected = true;
+
+                std::string ipv4Address = query_iface_ipv4(sock, name);
+                out += "if_nameindex.if=";
+                out += name;
+                out += " up=" + std::to_string(up ? 1 : 0);
+                out += " flags=";
+                append_hex_flags(out, flags);
+                out += " index=" + std::to_string(current->if_index);
+                if (!ipv4Address.empty()) {
+                    out += " addr=" + ipv4Address;
+                }
+                out += "\n";
+            }
+            if_freenameindex(ifs);
+        }
+        close(sock);
+    }
+
+    out += "getifaddrs.scan=start\n";
+    struct ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) != 0) {
+        out += "getifaddrs.error=errno=" + std::to_string(errno) + "\n";
+    } else {
+        std::set<std::string> emitted;
+        for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+            if (ifa->ifa_name == nullptr || !is_vpn_interface_name_c(ifa->ifa_name)) continue;
+            std::string name = ifa->ifa_name;
+            bool up = (ifa->ifa_flags & IFF_UP) != 0;
+            if (up) detected = true;
+
+            std::string key = name + ":" + std::to_string(ifa->ifa_flags);
+            if (!emitted.insert(key).second) continue;
+
+            out += "getifaddrs.if=";
+            out += name;
+            out += " up=" + std::to_string(up ? 1 : 0);
+            out += " flags=";
+            append_hex_flags(out, static_cast<unsigned int>(ifa->ifa_flags));
+            if (ifa->ifa_addr != nullptr) {
+                out += " family=" + std::to_string(ifa->ifa_addr->sa_family);
+            }
+            out += "\n";
+        }
+        freeifaddrs(ifaddr);
+    }
+
+    out = std::string("detected=") + (detected ? "1" : "0") + "\n" + out;
+    return out;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getVpnNativeSignals(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(collect_vpn_native_signals().c_str());
+}
+
+static void append_proxy_env_signal(std::string& out, bool& detected, const char* key) {
+    const char* value = getenv(key);
+    out += "env.";
+    out += key;
+    out += "=";
+    if (value != nullptr && value[0] != '\0') {
+        out += value;
+        detected = true;
+    } else {
+        out += "<empty>";
+    }
+    out += "\n";
+}
+
+static void append_proxy_prop_signal(std::string& out, bool& detected, const char* key) {
+    char value[PROP_VALUE_MAX] = {0};
+    int len = __system_property_get(key, value);
+    out += "prop.";
+    out += key;
+    out += "=";
+    if (len > 0 && value[0] != '\0') {
+        out += value;
+        detected = true;
+    } else {
+        out += "<empty>";
+    }
+    out += "\n";
+}
+
+static std::string collect_proxy_native_signals() {
+    std::string out;
+    bool detected = false;
+
+    append_proxy_env_signal(out, detected, "http_proxy");
+    append_proxy_env_signal(out, detected, "https_proxy");
+    append_proxy_env_signal(out, detected, "all_proxy");
+    append_proxy_prop_signal(out, detected, "net.gprs.http-proxy");
+
+    out = std::string("detected=") + (detected ? "1" : "0") + "\n" + out;
+    return out;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getProxyNativeSignals(JNIEnv *env, jobject thiz) {
+    return env->NewStringUTF(collect_proxy_native_signals().c_str());
 }
 
 // --- SELinux Fingerprint ---

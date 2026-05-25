@@ -23,6 +23,7 @@ import com.xff.launch.adapter.DetectionGroupAdapter;
 import com.xff.launch.detector.DebugDetector;
 import com.xff.launch.detector.EmulatorDetector;
 import com.xff.launch.detector.HookDetector;
+import com.xff.launch.detector.NetworkDetector;
 import com.xff.launch.detector.ReadlinkDetector;
 import com.xff.launch.detector.RootDetector;
 import com.xff.launch.detector.SideChannelDetector;
@@ -122,6 +123,7 @@ public class EnvironmentFragment extends Fragment {
         final String strHook = getString(R.string.category_hook);
         final String strEmulator = getString(R.string.category_emulator);
         final String strDebug = getString(R.string.category_debug);
+        final String strNetwork = getString(R.string.category_network);
         final String strSideChannel = getString(R.string.category_side_channel);
         final String strReadlink = getString(R.string.category_readlink);
         final String strZygote = getString(R.string.category_zygote);
@@ -132,7 +134,7 @@ public class EnvironmentFragment extends Fragment {
 
         executor.execute(() -> {
             DetectionResult result = performDetection(ctx,
-                    strRoot, strHook, strEmulator, strDebug, strSideChannel,
+                    strRoot, strHook, strEmulator, strDebug, strNetwork, strSideChannel,
                     strReadlink, strZygote, strTamper, strBootloader);
 
             if (getActivity() != null && isAdded()) {
@@ -148,7 +150,7 @@ public class EnvironmentFragment extends Fragment {
 
     private DetectionResult performDetection(Context ctx,
             String strRoot, String strHook, String strEmulator, String strDebug,
-            String strSideChannel, String strReadlink, String strZygote,
+            String strNetwork, String strSideChannel, String strReadlink, String strZygote,
             String strTamper, String strBootloader) {
         DetectionResult result = new DetectionResult();
         List<DetectionGroup> groups = new ArrayList<>();
@@ -192,6 +194,16 @@ public class EnvironmentFragment extends Fragment {
         DebugDetector debugDetector = new DebugDetector(ctx);
         debugGroup.setItems(debugDetector.getAllDetections());
         groups.add(debugGroup);
+
+        // Network Detection Group
+        DetectionGroup networkGroup = new DetectionGroup(
+                strNetwork,
+                DetectionCategory.NETWORK,
+                R.drawable.ic_network
+        );
+        NetworkDetector networkDetector = new NetworkDetector(ctx);
+        networkGroup.setItems(networkDetector.getAllDetections());
+        groups.add(networkGroup);
 
         // Runtime Integrity Detection Group
         DetectionGroup sideChannelGroup = new DetectionGroup(

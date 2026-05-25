@@ -19,9 +19,11 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Debug detection with multi-layer support
@@ -29,6 +31,7 @@ import java.util.Map;
 public class DebugDetector {
 
     private static final String TAG = "AdbDbgProp";
+    private static final String SETTINGS_ADB_WIFI_ENABLED = "adb_wifi_enabled";
 
     private final Context context;
     private final NativeDetector nativeDetector;
@@ -44,26 +47,28 @@ public class DebugDetector {
     public DetectionItem detectUsbDebugging() {
         DetectionItem item = new DetectionItem("USB 调试", "检测 USB 调试是否开启");
 
-        boolean enabled = false;
-        try {
-            enabled = Settings.Global.getInt(context.getContentResolver(),
-                    Settings.Global.ADB_ENABLED, 0) == 1;
-        } catch (Exception ignored) {
-        }
+        int adbEnabled = readGlobalInt(Settings.Global.ADB_ENABLED, 0);
+        int adbWifiEnabled = readGlobalInt(SETTINGS_ADB_WIFI_ENABLED, 0);
+        boolean enabled = adbEnabled == 1 || adbWifiEnabled == 1;
 
         item.setLayerResult(DetectionLayer.JAVA, enabled);
 
         if (enabled) {
             item.setStatus(DetectionStatus.WARNING);
-            item.setDetail("已开启");
-
-            // 添加详细检测信息
-            collectUsbDebuggingDetails(item);
+            if (adbEnabled == 1 && adbWifiEnabled == 1) {
+                item.setDetail("USB 调试与无线调试已开启");
+            } else if (adbWifiEnabled == 1) {
+                item.setDetail("无线调试已开启");
+            } else {
+                item.setDetail("USB 调试已开启");
+            }
         } else {
             item.setStatus(DetectionStatus.SAFE);
             item.setDetail("已关闭");
         }
 
+        collectUsbDebuggingDetails(item, adbEnabled, adbWifiEnabled);
+        logItemResult(item);
         return item;
     }
 
@@ -266,6 +271,8 @@ public class DebugDetector {
         items.add(detectPtrace());
         items.add(detectPtraceSelfProtection());
         items.add(detectAdbAndDebugSwitch());
+        items.add(detectUsbFunctionsRuntime());
+        items.add(detectAdbdRuntime());
         items.add(detectAdbConnection());
         items.add(detectPropertyAreaTampering());
         return items;
@@ -294,7 +301,9 @@ public class DebugDetector {
                 // ADB / 调试
                 "ro.debuggable", "ro.secure", "ro.adb.secure",
                 "persist.sys.usb.config", "sys.usb.config", "sys.usb.state",
-                "service.adb.tcp.port", "init.svc.adbd",
+                "service.adb.tcp.port", "service.adb.tls.port",
+                "persist.adb.tls_server.enable", "sys.usb.ffs.ready",
+                "persist.sys.usb.reboot.func", "init.svc.adbd",
                 // bootloader (京东 b.a 检测点)
                 "ro.boot.verifiedbootstate", "ro.boot.vbmeta.device_state",
                 // Riru / hook (京东 b.b 检测点)
@@ -352,7 +361,7 @@ public class DebugDetector {
                     item.addDetectionDetail("🚨 同文件多份",
                             key + " @ " + c.getKey(),
                             "命中 " + c.getValue().size() + " 次: " + c.getValue(),
-                            DetectionLayer.NATIVE, "🚨");
+                            DetectionLayer.NATIVE, "RISK");
                     diffDetail.append(key).append(" @ ").append(c.getKey())
                             .append(" x").append(c.getValue().size()).append("\n");
                 }
@@ -373,7 +382,7 @@ public class DebugDetector {
                 item.addDetectionDetail("⚠️ 跨 context 多份",
                         key + " 出现于 " + perCtx.size() + " 个文件",
                         ctxList.toString(),
-                        DetectionLayer.NATIVE, "⚠️");
+                        DetectionLayer.NATIVE, "WARN");
             }
         }
 
@@ -401,6 +410,208 @@ public class DebugDetector {
     }
 
     /**
+     * USB functions / runtime 检测。
+     *
+     * 目标是补充属性层看不到的当前 USB function 真值：属性可能被 hook 成未开启，
+     * 但 framework 或 sysfs/configfs runtime 仍能暴露 adb / ffs.adb。
+     */
+    public DetectionItem detectUsbFunctionsRuntime() {
+        DetectionItem item = new DetectionItem("USB functions/runtime",
+                "检测当前 USB functions、state、FunctionFS 与属性是否一致");
+
+        String[] keys = propertyKeys(USB_RUNTIME_PROPS);
+        Map<String, String> apiProps = readPropertiesViaApi(keys);
+        Map<String, String> nativeProps = readPropertiesByContext(USB_RUNTIME_PROPS);
+        Map<String, String> javaMmapProps = readPropertiesViaMmap(keys);
+        if (javaMmapProps == null) javaMmapProps = java.util.Collections.emptyMap();
+
+        boolean apiPropertyRuntimeAdb = hasCurrentUsbAdb(apiProps);
+        boolean nativePropertyRuntimeAdb = hasCurrentUsbAdb(nativeProps);
+        boolean javaMmapPropertyRuntimeAdb = hasCurrentUsbAdb(javaMmapProps);
+        boolean propertyRuntimeAdb = apiPropertyRuntimeAdb || nativePropertyRuntimeAdb || javaMmapPropertyRuntimeAdb;
+        boolean ffsReady = hasFfsReady(apiProps) || hasFfsReady(nativeProps) || hasFfsReady(javaMmapProps);
+        boolean persistAdb = hasPersistUsbAdb(apiProps) || hasPersistUsbAdb(nativeProps) || hasPersistUsbAdb(javaMmapProps);
+
+        boolean propertyInconsistent = false;
+        StringBuilder propertyDiff = new StringBuilder();
+        for (String[] def : USB_RUNTIME_PROPS) {
+            String key = def[0];
+            String ctxHint = def[1] + (def.length > 2 && !def[2].isEmpty() ? "," + def[2] : "");
+
+            String apiVal = apiProps.get(key);
+            String nativeVal = nativeProps.get(key);
+            String javaVal = javaMmapProps.get(key);
+
+            boolean runtimeHit = isCurrentUsbFunctionKey(key)
+                    && (containsAdbFunction(apiVal) || containsAdbFunction(nativeVal) || containsAdbFunction(javaVal));
+            boolean warnHit = "sys.usb.ffs.ready".equals(key)
+                    && (isTruthy(apiVal) || isTruthy(nativeVal) || isTruthy(javaVal));
+            boolean persistHit = key.startsWith("persist.")
+                    && (containsAdbFunction(apiVal) || containsAdbFunction(nativeVal) || containsAdbFunction(javaVal));
+            boolean consistent = consistentValues(apiVal, nativeVal, javaVal);
+
+            String display = "API     =" + formatValue(apiVal)
+                    + "\nNative  =" + formatValue(nativeVal) + "  [" + ctxHint + "]"
+                    + "\nJava    =" + formatValue(javaVal);
+            String icon = runtimeHit ? "RISK" : (warnHit || persistHit ? "WARN" : (consistent ? "SAFE" : "RISK"));
+            item.addDetectionDetail("USB 属性", key, display, DetectionLayer.NATIVE, icon);
+
+            if (!consistent) {
+                propertyInconsistent = true;
+                propertyDiff.append(key)
+                        .append(": API=").append(formatValue(apiVal))
+                        .append(" / Native=").append(formatValue(nativeVal))
+                        .append(" / Java=").append(formatValue(javaVal))
+                        .append("\n");
+            }
+        }
+
+        if (propertyInconsistent) {
+            item.addDetectionDetail("USB 属性交叉验证", "属性三路读取不一致",
+                    propertyDiff.toString().trim(), DetectionLayer.NATIVE, "RISK");
+        }
+
+        UsbFrameworkScan frameworkScan = scanUsbFrameworkRuntime();
+        if (frameworkScan.available) {
+            item.addDetectionDetail("USB framework", "UsbManager runtime",
+                    frameworkScan.detail, DetectionLayer.JAVA,
+                    frameworkScan.adbRuntime ? "RISK" : "SAFE");
+        } else {
+            item.addDetectionDetail("USB framework", "UsbManager runtime",
+                    frameworkScan.detail, DetectionLayer.JAVA, "INFO");
+        }
+
+        UsbRuntimeScan runtimeScan = scanUsbRuntimeFiles(item);
+
+        boolean runtimeAdb = propertyRuntimeAdb || frameworkScan.adbRuntime || runtimeScan.adbRuntime;
+        boolean runtimeMismatch = !apiPropertyRuntimeAdb
+                && (nativePropertyRuntimeAdb || javaMmapPropertyRuntimeAdb
+                || frameworkScan.adbRuntime || runtimeScan.adbRuntime);
+        boolean auxiliaryOnly = ffsReady || persistAdb || runtimeScan.ffsEvidence;
+
+        item.setLayerResult(DetectionLayer.JAVA, apiPropertyRuntimeAdb || frameworkScan.adbRuntime);
+        item.setLayerResult(DetectionLayer.NATIVE, nativePropertyRuntimeAdb);
+        item.setLayerResult(DetectionLayer.SYSCALL, javaMmapPropertyRuntimeAdb || runtimeScan.adbRuntime);
+
+        if (runtimeMismatch) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("Java 属性未显示 adb，但 Native/mmap/runtime 命中 adb/ffs.adb");
+            item.addDetectionDetail("USB runtime 交叉验证", "属性与 runtime 不一致",
+                    "API sys.usb.config/state 未包含 adb，但 Native/Java mmap/framework/sysfs/configfs 发现当前 adb function",
+                    DetectionLayer.SYSCALL, "RISK");
+        } else if (propertyInconsistent) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("USB 属性 API / Native / Java 读取结果不一致");
+        } else if (runtimeAdb) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("当前 USB runtime 包含 adb function");
+        } else if (auxiliaryOnly) {
+            item.setStatus(DetectionStatus.WARNING);
+            item.setDetail("发现 FunctionFS 或 persist 辅助证据，但未确认当前 adb function");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("当前 USB runtime 未发现 adb function");
+        }
+
+        logItemResult(item);
+        return item;
+    }
+
+    /**
+     * adbd 运行态独立检测。
+     *
+     * 不依赖 Settings.Global.ADB_ENABLED，避免设置值被伪装成 0 时隐藏 adbd 进程/服务证据。
+     */
+    public DetectionItem detectAdbdRuntime() {
+        DetectionItem item = new DetectionItem("adbd 运行态",
+                "独立检测 adbd 进程、init service 与 ADB TCP/TLS 端口");
+
+        String[] keys = {
+                "init.svc.adbd",
+                "service.adb.tcp.port",
+                "service.adb.tls.port",
+                "persist.adb.tls_server.enable"
+        };
+        Map<String, String> props = readPropertiesViaApi(keys);
+
+        boolean initRunning = "running".equals(props.get("init.svc.adbd"));
+        int tcpPort = parseAdbPort(props.get("service.adb.tcp.port"));
+        int tlsPort = parseAdbPort(props.get("service.adb.tls.port"));
+        boolean tlsServerEnabled = isTruthy(props.get("persist.adb.tls_server.enable"));
+        boolean propertyRisk = initRunning || tcpPort > 0 || tlsPort > 0 || tlsServerEnabled;
+
+        for (String key : keys) {
+            String value = props.get(key);
+            boolean hit;
+            if ("init.svc.adbd".equals(key)) {
+                hit = "running".equals(value);
+            } else if ("persist.adb.tls_server.enable".equals(key)) {
+                hit = isTruthy(value);
+            } else {
+                hit = parseAdbPort(value) > 0;
+            }
+            item.addDetectionDetail("adbd 属性", key, formatValue(value),
+                    DetectionLayer.JAVA, hit ? "RISK" : "SAFE");
+        }
+
+        AdbdProcessScan processScan = scanAdbdProcesses();
+        for (String match : processScan.matches) {
+            item.addDetectionDetail("adbd 进程", "adbd", match, DetectionLayer.SYSCALL, "RISK");
+        }
+        if (processScan.matches.isEmpty()) {
+            String scanDetail = processScan.procReadable
+                    ? "已扫描 " + processScan.checkedPids + " 个 pid，未发现 adbd"
+                    : "/proc 不可枚举，无法扫描 adbd 进程";
+            item.addDetectionDetail("adbd 进程", "/proc 扫描", scanDetail,
+                    DetectionLayer.SYSCALL, processScan.procReadable ? "SAFE" : "INFO");
+        }
+
+        List<Integer> probePorts = buildAdbProbePorts(tcpPort, tlsPort, true);
+        List<Integer> openPorts = new ArrayList<>();
+        for (int port : probePorts) {
+            if (probeLocalTcpPort(port)) {
+                openPorts.add(port);
+                item.addDetectionDetail("adbd 端口", "TCP " + port,
+                        "127.0.0.1:" + port + " 可连接",
+                        DetectionLayer.JAVA, "RISK");
+            }
+        }
+        if (openPorts.isEmpty()) {
+            item.addDetectionDetail("adbd 端口", "本机端口探测",
+                    "probed=" + probePorts + ", open=[]",
+                    DetectionLayer.JAVA, "SAFE");
+        }
+
+        boolean processRisk = !processScan.matches.isEmpty();
+        boolean portRisk = !openPorts.isEmpty();
+
+        item.setLayerResult(DetectionLayer.JAVA, propertyRisk || portRisk);
+        item.setLayerResult(DetectionLayer.SYSCALL, processRisk);
+
+        if (propertyRisk || processRisk || portRisk) {
+            item.setStatus(DetectionStatus.RISK);
+            StringBuilder detail = new StringBuilder();
+            if (initRunning) detail.append("init.svc.adbd=running; ");
+            if (tcpPort > 0) detail.append("service.adb.tcp.port=").append(tcpPort).append("; ");
+            if (tlsPort > 0) detail.append("service.adb.tls.port=").append(tlsPort).append("; ");
+            if (tlsServerEnabled) detail.append("persist.adb.tls_server.enable=1; ");
+            if (processRisk) detail.append("发现 adbd 进程; ");
+            if (portRisk) detail.append("ADB 端口可连接 ").append(openPorts).append("; ");
+            item.setDetail(detail.toString().trim());
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未发现 adbd 运行态证据");
+        }
+
+        Log.i(TAG, "adbd-runtime: props=" + props
+                + " process=" + processScan.matches
+                + " probed=" + probePorts
+                + " open=" + openPorts);
+        logItemResult(item);
+        return item;
+    }
+
+    /**
      * ADB 网络监听检测。
      *
      * 局限：Android 10+ 起 untrusted_app 读不到 /proc/net/tcp（EACCES），无法从应用域
@@ -418,19 +629,14 @@ public class DebugDetector {
         DetectionItem item = new DetectionItem("ADB 网络监听",
                 "主动 TCP 探测 wireless adbd 监听端口");
 
-        int configuredPort = -1;
-        try {
-            Map<String, String> apiVals = readPropertiesViaApi(new String[]{"service.adb.tcp.port"});
-            String p = apiVals.get("service.adb.tcp.port");
-            if (p != null && !p.isEmpty() && !"-1".equals(p) && !"0".equals(p)) {
-                configuredPort = Integer.parseInt(p.trim());
-            }
-        } catch (Throwable ignored) {
-        }
+        Map<String, String> apiVals = readPropertiesViaApi(new String[]{
+                "service.adb.tcp.port",
+                "service.adb.tls.port"
+        });
+        int configuredTcpPort = parseAdbPort(apiVals.get("service.adb.tcp.port"));
+        int configuredTlsPort = parseAdbPort(apiVals.get("service.adb.tls.port"));
 
-        List<Integer> probePorts = new ArrayList<>();
-        if (configuredPort > 0) probePorts.add(configuredPort);
-        if (!probePorts.contains(5555)) probePorts.add(5555);
+        List<Integer> probePorts = buildAdbProbePorts(configuredTcpPort, configuredTlsPort, true);
 
         List<Integer> openPorts = new ArrayList<>();
         for (int port : probePorts) {
@@ -439,7 +645,8 @@ public class DebugDetector {
             }
         }
 
-        Log.i(TAG, "adb-listen: configured=" + configuredPort
+        Log.i(TAG, "adb-listen: tcp=" + configuredTcpPort
+                + " tls=" + configuredTlsPort
                 + " probed=" + probePorts
                 + " open=" + openPorts);
 
@@ -454,27 +661,35 @@ public class DebugDetector {
             }
             item.setDetail(detail.toString());
             for (int port : openPorts) {
-                String label = port == configuredPort
+                String label = port == configuredTcpPort
                         ? "service.adb.tcp.port = " + port
+                        : port == configuredTlsPort
+                        ? "service.adb.tls.port = " + port
                         : "默认 wireless adb 端口";
                 item.addDetectionDetail("🌐 监听端口", "TCP " + port,
                         "127.0.0.1:" + port + " 可连接\n" + label,
-                        DetectionLayer.JAVA, "📡");
+                        DetectionLayer.JAVA, "RISK");
             }
-            if (configuredPort > 0 && !openPorts.contains(configuredPort)) {
+            if (configuredTcpPort > 0 && !openPorts.contains(configuredTcpPort)) {
                 item.addDetectionDetail("⚠️ 异常情况", "属性指向的端口未在监听",
-                        "service.adb.tcp.port=" + configuredPort + " 但 connect 失败",
-                        DetectionLayer.JAVA, "🚨");
+                        "service.adb.tcp.port=" + configuredTcpPort + " 但 connect 失败",
+                        DetectionLayer.JAVA, "WARN");
             }
-        } else if (configuredPort > 0) {
+            if (configuredTlsPort > 0 && !openPorts.contains(configuredTlsPort)) {
+                item.addDetectionDetail("⚠️ 异常情况", "TLS 属性指向的端口未在监听",
+                        "service.adb.tls.port=" + configuredTlsPort + " 但 connect 失败",
+                        DetectionLayer.JAVA, "WARN");
+            }
+        } else if (configuredTcpPort > 0 || configuredTlsPort > 0) {
             // 属性显示开了端口，但 connect 失败 — 异常状态（hook 嫌疑）
             item.setStatus(DetectionStatus.RISK);
-            item.setDetail("属性指向 wireless 端口 " + configuredPort
-                    + " 但 connect 失败 (可能被 hook 写入假值)");
+            item.setDetail("属性指向 wireless 端口但 connect 失败: tcp="
+                    + configuredTcpPort + ", tls=" + configuredTlsPort
+                    + " (可能被 hook 写入假值)");
             item.addDetectionDetail("⚠️ 异常情况",
-                    "service.adb.tcp.port=" + configuredPort + " 但端口未监听",
+                    "ADB TCP/TLS 属性端口未监听",
                     "SystemProperties 与实际 socket 状态不一致",
-                    DetectionLayer.JAVA, "🚨");
+                    DetectionLayer.JAVA, "RISK");
         } else {
             item.setStatus(DetectionStatus.SAFE);
             item.setDetail("wireless ADB 未启用");
@@ -483,8 +698,9 @@ public class DebugDetector {
         item.addDetectionDetail("ℹ️ 检测限制", "USB ADB host attached 不可观测",
                 "Android 10+ untrusted_app 无法读 /proc/net/tcp；USB ADB 走 USB function 不走 TCP。\n"
                         + "本检测仅覆盖 wireless ADB 监听 (\"adb tcpip\" / Android 11+ Wireless Debugging)",
-                DetectionLayer.JAVA, "ℹ️");
+                DetectionLayer.JAVA, "INFO");
 
+        logItemResult(item);
         return item;
     }
 
@@ -498,6 +714,460 @@ public class DebugDetector {
             return false;
         } finally {
             try { if (socket != null) socket.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private static final long USB_FUNCTION_ADB = 1L;
+
+    private static final String[] USB_RUNTIME_VALUE_PATHS = {
+            "/sys/class/android_usb/android0/functions",
+            "/sys/class/android_usb/android0/state",
+            "/sys/class/android_usb/android0/enable"
+    };
+
+    private static final String[] USB_RUNTIME_EXISTENCE_PATHS = {
+            "/dev/usb-ffs/adb",
+            "/dev/usb-ffs/adb/ep0",
+            "/config/usb_gadget/g1/functions/ffs.adb"
+    };
+
+    private static final String[] USB_CONFIGFS_CONFIG_DIRS = {
+            "/config/usb_gadget/g1/configs/b.1"
+    };
+
+    private UsbFrameworkScan scanUsbFrameworkRuntime() {
+        UsbFrameworkScan scan = new UsbFrameworkScan();
+        StringBuilder detail = new StringBuilder();
+        try {
+            Object usbManager = context.getSystemService(Context.USB_SERVICE);
+            if (usbManager == null) {
+                scan.detail = "Context.USB_SERVICE 不可用";
+                return scan;
+            }
+
+            scan.available = true;
+            try {
+                Object current = invokeNoArg(usbManager, "getCurrentFunctions");
+                if (current instanceof Number) {
+                    long functions = ((Number) current).longValue();
+                    String functionText = usbFunctionsToString(functions);
+                    boolean adbBit = (functions & USB_FUNCTION_ADB) != 0;
+                    scan.adbRuntime = adbBit || containsAdbFunction(functionText);
+                    detail.append("currentFunctions=").append(functions)
+                            .append(" [").append(functionText).append("]");
+                } else {
+                    detail.append("getCurrentFunctions 返回 ")
+                            .append(current == null ? "null" : current.toString());
+                }
+            } catch (Throwable t) {
+                detail.append("getCurrentFunctions 不可用: ").append(simpleError(t));
+            }
+
+            try {
+                Object applied = invokeNoArg(usbManager, "getCurrentFunctionsApplied");
+                if (detail.length() > 0) detail.append("\n");
+                detail.append("currentFunctionsApplied=").append(applied);
+            } catch (Throwable t) {
+                if (detail.length() > 0) detail.append("\n");
+                detail.append("getCurrentFunctionsApplied 不可用: ").append(simpleError(t));
+            }
+        } catch (Throwable t) {
+            scan.detail = "USB framework 检测失败: " + simpleError(t);
+            return scan;
+        }
+
+        scan.detail = detail.length() == 0 ? "USB framework 未返回 runtime 信息" : detail.toString();
+        return scan;
+    }
+
+    private UsbRuntimeScan scanUsbRuntimeFiles(DetectionItem item) {
+        UsbRuntimeScan scan = new UsbRuntimeScan();
+
+        for (String path : USB_RUNTIME_VALUE_PATHS) {
+            FileReadResult result = readSmallTextLayered(path);
+            if (result.present) {
+                scan.readableCount++;
+                boolean hit = containsAdbFunction(result.value);
+                if (hit) scan.adbRuntime = true;
+                item.addDetectionDetail("sysfs/configfs", path,
+                        trimDisplay(result.value), result.layer, hit ? "RISK" : "SAFE");
+            } else {
+                scan.unreadableCount++;
+            }
+        }
+
+        for (String dirPath : USB_CONFIGFS_CONFIG_DIRS) {
+            File dir = new File(dirPath);
+            File[] children = null;
+            try {
+                children = dir.listFiles();
+            } catch (Throwable ignored) {
+            }
+            if (children == null) {
+                scan.unreadableCount++;
+                continue;
+            }
+
+            scan.readableCount++;
+            if (children.length == 0) {
+                item.addDetectionDetail("sysfs/configfs", dirPath,
+                        "目录可读，但当前配置为空", DetectionLayer.JAVA, "SAFE");
+                continue;
+            }
+
+            for (File child : children) {
+                String target = safeCanonicalPath(child);
+                String value = "entry=" + child.getName()
+                        + (target.isEmpty() ? "" : "\ntarget=" + target);
+                boolean hit = containsAdbFunction(child.getName()) || containsAdbFunction(target);
+                if (hit) scan.adbRuntime = true;
+                item.addDetectionDetail("sysfs/configfs", dirPath + "/" + child.getName(),
+                        value, DetectionLayer.JAVA, hit ? "RISK" : "SAFE");
+            }
+        }
+
+        for (String path : USB_RUNTIME_EXISTENCE_PATHS) {
+            FileExistResult exists = fileExistsLayered(path);
+            if (!exists.exists) {
+                scan.unreadableCount++;
+                continue;
+            }
+
+            boolean ep0 = path.endsWith("/ep0");
+            boolean configuredFunction = path.contains("/configs/") || ep0;
+            scan.ffsEvidence = true;
+            if (configuredFunction) scan.adbRuntime = true;
+            item.addDetectionDetail("sysfs/configfs", path,
+                    "存在 (" + exists.source + ")",
+                    exists.layer, configuredFunction ? "RISK" : "WARN");
+        }
+
+        if (scan.readableCount == 0 && scan.unreadableCount > 0) {
+            item.addDetectionDetail("sysfs/configfs", "访问限制",
+                    "普通 App 当前无法读取 USB sysfs/configfs 路径，已尝试 Java 与 syscall 读取",
+                    DetectionLayer.SYSCALL, "INFO");
+        }
+        return scan;
+    }
+
+    private AdbdProcessScan scanAdbdProcesses() {
+        AdbdProcessScan scan = new AdbdProcessScan();
+        File procDir = new File("/proc");
+        File[] procs = null;
+        try {
+            procs = procDir.listFiles();
+        } catch (Throwable ignored) {
+        }
+        if (procs == null) {
+            scan.procReadable = false;
+            return scan;
+        }
+
+        scan.procReadable = true;
+        Set<String> seen = new HashSet<>();
+        for (File proc : procs) {
+            String pid = proc.getName();
+            if (!pid.matches("\\d+")) continue;
+            scan.checkedPids++;
+
+            FileReadResult cmdline = readSmallTextLayered("/proc/" + pid + "/cmdline");
+            FileReadResult comm = readSmallTextLayered("/proc/" + pid + "/comm");
+            String cmd = normalizeProcText(cmdline.value);
+            String name = normalizeProcText(comm.value);
+
+            if (isAdbdProcess(cmd, name) && seen.add(pid)) {
+                StringBuilder value = new StringBuilder("PID: ").append(pid);
+                if (!name.isEmpty()) value.append("\nCOMM: ").append(name);
+                if (!cmd.isEmpty()) value.append("\nCMD: ").append(cmd);
+                scan.matches.add(value.toString());
+            }
+        }
+        return scan;
+    }
+
+    private FileReadResult readSmallTextLayered(String path) {
+        String javaValue = readSmallTextJava(path);
+        if (isPresent(javaValue)) {
+            return new FileReadResult(true, javaValue, DetectionLayer.JAVA);
+        }
+
+        String syscallValue = "";
+        try {
+            syscallValue = nativeDetector.readFileSyscall(path);
+        } catch (Throwable ignored) {
+        }
+        if (isPresent(syscallValue)) {
+            return new FileReadResult(true, syscallValue, DetectionLayer.SYSCALL);
+        }
+
+        return new FileReadResult(false, "", DetectionLayer.SYSCALL);
+    }
+
+    private static String readSmallTextJava(String path) {
+        File file = new File(path);
+        if (!file.exists() || file.isDirectory()) return "";
+        try (FileInputStream input = new FileInputStream(file)) {
+            byte[] data = new byte[4096];
+            int read = input.read(data);
+            if (read <= 0) return "";
+            return new String(data, 0, read, StandardCharsets.UTF_8).trim();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private FileExistResult fileExistsLayered(String path) {
+        try {
+            if (new File(path).exists()) {
+                return new FileExistResult(true, "java", DetectionLayer.JAVA);
+            }
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            if (nativeDetector.fileExistsSyscall(path)) {
+                return new FileExistResult(true, "syscall", DetectionLayer.SYSCALL);
+            }
+        } catch (Throwable ignored) {
+        }
+
+        return new FileExistResult(false, "", DetectionLayer.SYSCALL);
+    }
+
+    private static boolean isAdbdProcess(String cmdline, String comm) {
+        if ("adbd".equals(comm)) return true;
+        if (cmdline == null || cmdline.isEmpty()) return false;
+
+        String first = cmdline.split("\\s+")[0];
+        int slash = first.lastIndexOf('/');
+        String base = slash >= 0 ? first.substring(slash + 1) : first;
+        return "adbd".equals(base);
+    }
+
+    private static String normalizeProcText(String value) {
+        if (value == null) return "";
+        return value.replace('\0', ' ').trim();
+    }
+
+    private static List<Integer> buildAdbProbePorts(int tcpPort, int tlsPort, boolean includeDefault) {
+        List<Integer> ports = new ArrayList<>();
+        addProbePort(ports, tcpPort);
+        addProbePort(ports, tlsPort);
+        if (includeDefault) addProbePort(ports, 5555);
+        return ports;
+    }
+
+    private static void addProbePort(List<Integer> ports, int port) {
+        if (port > 0 && port <= 65535 && !ports.contains(port)) {
+            ports.add(port);
+        }
+    }
+
+    private static int parseAdbPort(String value) {
+        if (value == null) return -1;
+        String trimmed = value.trim();
+        if (trimmed.isEmpty() || "-1".equals(trimmed) || "0".equals(trimmed)) return -1;
+        try {
+            int port = Integer.parseInt(trimmed);
+            return port > 0 && port <= 65535 ? port : -1;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private int readGlobalInt(String key, int defaultValue) {
+        try {
+            return Settings.Global.getInt(context.getContentResolver(), key, defaultValue);
+        } catch (Throwable ignored) {
+            return defaultValue;
+        }
+    }
+
+    private static String[] propertyKeys(String[][] defs) {
+        String[] keys = new String[defs.length];
+        for (int i = 0; i < defs.length; i++) {
+            keys[i] = defs[i][0];
+        }
+        return keys;
+    }
+
+    private static boolean hasCurrentUsbAdb(Map<String, String> values) {
+        return values != null
+                && (containsAdbFunction(values.get("sys.usb.config"))
+                || containsAdbFunction(values.get("sys.usb.state")));
+    }
+
+    private static boolean hasPersistUsbAdb(Map<String, String> values) {
+        return values != null
+                && (containsAdbFunction(values.get("persist.sys.usb.config"))
+                || containsAdbFunction(values.get("persist.sys.usb.reboot.func")));
+    }
+
+    private static boolean hasFfsReady(Map<String, String> values) {
+        return values != null && isTruthy(values.get("sys.usb.ffs.ready"));
+    }
+
+    private static boolean isTruthy(String value) {
+        if (value == null) return false;
+        String v = value.trim().toLowerCase(java.util.Locale.US);
+        return "1".equals(v) || "true".equals(v) || "enabled".equals(v)
+                || "on".equals(v) || "yes".equals(v);
+    }
+
+    private static boolean containsAdbFunction(String value) {
+        if (value == null) return false;
+        String lower = value.toLowerCase(java.util.Locale.US);
+        return lower.contains("adb") || lower.contains("ffs.adb");
+    }
+
+    private static boolean isCurrentUsbFunctionKey(String key) {
+        return "sys.usb.config".equals(key) || "sys.usb.state".equals(key);
+    }
+
+    private static Object invokeNoArg(Object target, String methodName) throws Exception {
+        Method method = findNoArgMethod(target.getClass(), methodName);
+        try {
+            method.setAccessible(true);
+        } catch (Throwable ignored) {
+        }
+        return method.invoke(target);
+    }
+
+    private static Method findNoArgMethod(Class<?> type, String methodName) throws NoSuchMethodException {
+        Class<?> current = type;
+        while (current != null) {
+            try {
+                return current.getDeclaredMethod(methodName);
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        return type.getMethod(methodName);
+    }
+
+    private static String usbFunctionsToString(long functions) {
+        try {
+            Class<?> usbManager = Class.forName("android.hardware.usb.UsbManager");
+            Method method = usbManager.getDeclaredMethod("usbFunctionsToString", long.class);
+            try {
+                method.setAccessible(true);
+            } catch (Throwable ignored) {
+            }
+            Object value = method.invoke(null, functions);
+            if (value instanceof String && !((String) value).isEmpty()) {
+                return (String) value;
+            }
+        } catch (Throwable ignored) {
+        }
+        return decodeUsbFunctions(functions);
+    }
+
+    private static String decodeUsbFunctions(long functions) {
+        if (functions == 0L) return "none";
+        List<String> names = new ArrayList<>();
+        if ((functions & 1L) != 0) names.add("adb");
+        if ((functions & 2L) != 0) names.add("accessory");
+        if ((functions & 4L) != 0) names.add("mtp");
+        if ((functions & 8L) != 0) names.add("midi");
+        if ((functions & 16L) != 0) names.add("ptp");
+        if ((functions & 32L) != 0) names.add("rndis");
+        if ((functions & 64L) != 0) names.add("audio_source");
+        if (names.isEmpty()) names.add("unknown_bits=0x" + Long.toHexString(functions));
+        return joinStrings(names, ",");
+    }
+
+    private static String safeCanonicalPath(File file) {
+        try {
+            return file.getCanonicalPath();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static String trimDisplay(String value) {
+        if (value == null) return "";
+        String text = value.replace('\0', ' ').trim();
+        return text.length() > 500 ? text.substring(0, 500) + "..." : text;
+    }
+
+    private static String simpleError(Throwable throwable) {
+        if (throwable == null) return "unknown";
+        String message = throwable.getMessage();
+        return throwable.getClass().getSimpleName()
+                + (message == null || message.isEmpty() ? "" : ": " + message);
+    }
+
+    private static String joinStrings(List<String> values, String separator) {
+        StringBuilder out = new StringBuilder();
+        for (String value : values) {
+            if (out.length() > 0) out.append(separator);
+            out.append(value);
+        }
+        return out.toString();
+    }
+
+    private static void logItemResult(DetectionItem item) {
+        if (item == null) return;
+        Log.i(TAG, "result item=" + item.getName()
+                + " status=" + item.getStatus()
+                + " detail=" + item.getDetail()
+                + " layers=" + item.getLayerResults());
+
+        if (!item.hasDetails()) return;
+        for (DetectionItem.DetectionDetail detail : item.getDetectionDetails()) {
+            String value = detail.getValue();
+            if (value != null && value.length() > 400) {
+                value = value.substring(0, 400) + "...";
+            }
+            Log.i(TAG, "detail item=" + item.getName()
+                    + " category=" + detail.getCategory()
+                    + " key=" + detail.getItem()
+                    + " value=" + value
+                    + " layer=" + detail.getLayer()
+                    + " icon=" + detail.getIcon());
+        }
+    }
+
+    private static final class UsbFrameworkScan {
+        boolean available;
+        boolean adbRuntime;
+        String detail = "";
+    }
+
+    private static final class UsbRuntimeScan {
+        boolean adbRuntime;
+        boolean ffsEvidence;
+        int readableCount;
+        int unreadableCount;
+    }
+
+    private static final class AdbdProcessScan {
+        boolean procReadable;
+        int checkedPids;
+        final List<String> matches = new ArrayList<>();
+    }
+
+    private static final class FileReadResult {
+        final boolean present;
+        final String value;
+        final DetectionLayer layer;
+
+        FileReadResult(boolean present, String value, DetectionLayer layer) {
+            this.present = present;
+            this.value = value == null ? "" : value;
+            this.layer = layer;
+        }
+    }
+
+    private static final class FileExistResult {
+        final boolean exists;
+        final String source;
+        final DetectionLayer layer;
+
+        FileExistResult(boolean exists, String source, DetectionLayer layer) {
+            this.exists = exists;
+            this.source = source;
+            this.layer = layer;
         }
     }
 
@@ -547,7 +1217,7 @@ public class DebugDetector {
             item.addDetectionDetail("🚧 mmap 不可用",
                     "/dev/__properties__ 所有 context 文件均无法 open",
                     diag.isEmpty() ? "Native 诊断不可用" : diag.trim(),
-                    DetectionLayer.NATIVE, "🚧");
+                    DetectionLayer.NATIVE, "INFO");
         }
 
         boolean apiRisky = false;
@@ -580,7 +1250,7 @@ public class DebugDetector {
                 String display = "API     =" + formatValue(apiVal)
                         + "\nNative  =" + formatValue(nativeVal) + "  [" + ctxHint + "]"
                         + "\nJava    =" + formatValue(javaVal);
-                String icon = (nativeHit || apiHit || javaHit) ? "⚠️" : (consistent ? "📄" : "🚨");
+                String icon = (nativeHit || apiHit || javaHit) ? "RISK" : (consistent ? "SAFE" : "RISK");
                 item.addDetectionDetail("📄 ADB/调试属性", key, display,
                         DetectionLayer.NATIVE, icon);
             }
@@ -605,7 +1275,7 @@ public class DebugDetector {
             item.addDetectionDetail("⚠️ 异常情况",
                     "三路结果不一致 (疑似 SystemProperties 或 mmap 被 hook)",
                     diff.toString().trim(),
-                    DetectionLayer.NATIVE, "🚨");
+                    DetectionLayer.NATIVE, "RISK");
         }
 
         item.setLayerResult(DetectionLayer.JAVA, apiRisky);
@@ -649,6 +1319,7 @@ public class DebugDetector {
         } catch (Throwable ignored) {
         }
 
+        logItemResult(item);
         return item;
     }
 
@@ -801,16 +1472,15 @@ public class DebugDetector {
     /**
      * Collect USB debugging details
      */
-    private void collectUsbDebuggingDetails(DetectionItem item) {
+    private void collectUsbDebuggingDetails(DetectionItem item, int adbEnabled, int adbWifiEnabled) {
         // ADB 状态
-        try {
-            int adbEnabled = Settings.Global.getInt(context.getContentResolver(),
-                Settings.Global.ADB_ENABLED, 0);
-            item.addDetectionDetail("⚙️ 系统设置", "ADB_ENABLED",
+        item.addDetectionDetail("⚙️ 系统设置", "ADB_ENABLED",
                 "值: " + adbEnabled + " (1=开启, 0=关闭)",
-                DetectionLayer.JAVA, "🔧");
-        } catch (Exception ignored) {
-        }
+                DetectionLayer.JAVA, adbEnabled == 1 ? "WARN" : "SAFE");
+
+        item.addDetectionDetail("⚙️ 系统设置", "ADB_WIFI_ENABLED",
+                "key=" + SETTINGS_ADB_WIFI_ENABLED + ", 值: " + adbWifiEnabled + " (1=开启, 0=关闭)",
+                DetectionLayer.JAVA, adbWifiEnabled == 1 ? "WARN" : "SAFE");
 
         // 开发者选项状态
         try {
@@ -818,34 +1488,7 @@ public class DebugDetector {
                 Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0);
             item.addDetectionDetail("⚙️ 系统设置", "开发者选项",
                 devEnabled == 1 ? "已开启" : "已关闭",
-                DetectionLayer.JAVA, "🛠️");
-        } catch (Exception ignored) {
-        }
-
-        // 检测 adbd 进程
-        try {
-            java.io.File procDir = new java.io.File("/proc");
-            java.io.File[] procs = procDir.listFiles();
-            if (procs != null) {
-                for (java.io.File proc : procs) {
-                    if (!proc.getName().matches("\\d+")) continue;
-
-                    try {
-                        java.io.File cmdlineFile = new java.io.File(proc, "cmdline");
-                        if (cmdlineFile.exists()) {
-                            BufferedReader reader = new BufferedReader(new FileReader(cmdlineFile));
-                            String cmdline = reader.readLine();
-                            reader.close();
-
-                            if (cmdline != null && cmdline.contains("adbd")) {
-                                item.addDetectionDetail("🔄 ADB 进程", "adbd",
-                                    "PID: " + proc.getName() + "\nCMD: " + cmdline,
-                                    DetectionLayer.NATIVE, "⚙️");
-                            }
-                        }
-                    } catch (Exception ignored) {}
-                }
-            }
+                DetectionLayer.JAVA, devEnabled == 1 ? "WARN" : "SAFE");
         } catch (Exception ignored) {
         }
     }
@@ -1131,8 +1774,20 @@ public class DebugDetector {
             {"persist.sys.usb.config", "system_prop",               "usb_prop"},
             {"sys.usb.config",         "usb_control_prop",          "usb_prop"},
             {"sys.usb.state",          "usb_control_prop",          "usb_prop"},
+            {"sys.usb.ffs.ready",      "ffs_prop",                  "usb_prop"},
             {"service.adb.tcp.port",   "adbd_config_prop",          "usb_prop"},
+            {"service.adb.tls.port",   "adbd_config_prop",          "adb_prop"},
+            {"persist.adb.tls_server.enable", "adbd_config_prop",   "adb_prop"},
+            {"persist.sys.usb.reboot.func", "usb_prop",             "system_prop"},
             {"init.svc.adbd",          "init_service_status_prop",  "default_prop"},
+    };
+
+    private static final String[][] USB_RUNTIME_PROPS = {
+            {"sys.usb.config",              "usb_control_prop", "usb_prop"},
+            {"sys.usb.state",               "usb_control_prop", "usb_prop"},
+            {"sys.usb.ffs.ready",           "ffs_prop",         "usb_prop"},
+            {"persist.sys.usb.config",      "system_prop",      "usb_prop"},
+            {"persist.sys.usb.reboot.func", "usb_prop",         "system_prop"},
     };
 
     private static boolean evaluateRisk(String key, String value) {
@@ -1144,7 +1799,10 @@ public class DebugDetector {
             case "ro.adb.secure":
                 return "0".equals(value);
             case "service.adb.tcp.port":
+            case "service.adb.tls.port":
                 return !"-1".equals(value) && !"0".equals(value);
+            case "persist.adb.tls_server.enable":
+                return isTruthy(value);
             case "init.svc.adbd":
                 return "running".equals(value);
             // 注意：persist.sys.usb.config 是「持久化偏好」，MIUI 等 ROM 关 USB 调试后

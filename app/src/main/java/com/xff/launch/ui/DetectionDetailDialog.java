@@ -20,7 +20,6 @@ import com.xff.launch.R;
 import com.xff.launch.model.DetectionItem;
 import com.xff.launch.model.DetectionLayer;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -124,7 +123,7 @@ public class DetectionDetailDialog extends DialogFragment {
             List<DetectionItem.DetectionDetail> details = detectionItem.getDetectionDetails();
             if (details != null && !details.isEmpty()) {
             // 按分类分组
-            Map<String, List<DetectionItem.DetectionDetail>> groupedDetails = new HashMap<>();
+            Map<String, List<DetectionItem.DetectionDetail>> groupedDetails = new java.util.LinkedHashMap<>();
             for (DetectionItem.DetectionDetail detail : details) {
                 String category = detail.getCategory();
                 if (!groupedDetails.containsKey(category)) {
@@ -228,7 +227,24 @@ public class DetectionDetailDialog extends DialogFragment {
         LinearLayout itemView = new LinearLayout(context);
         itemView.setOrientation(LinearLayout.VERTICAL);
         itemView.setPadding(32, 8, 16, 8);
-        itemView.setBackgroundColor(Color.parseColor("#F8F8F8"));
+
+        int backgroundColor = Color.parseColor("#F8F8F8");
+        int titleColor = Color.parseColor("#333333");
+        int valueColor = Color.parseColor("#666666");
+        if (isRiskDetail(detail)) {
+            backgroundColor = Color.parseColor("#FFEBEE");
+            titleColor = Color.parseColor("#D32F2F");
+            valueColor = Color.parseColor("#B71C1C");
+        } else if (isWarningDetail(detail)) {
+            backgroundColor = Color.parseColor("#FFF8E1");
+            titleColor = Color.parseColor("#E65100");
+            valueColor = Color.parseColor("#795548");
+        } else if (isSafeDetail(detail)) {
+            backgroundColor = Color.parseColor("#F1F8E9");
+            titleColor = Color.parseColor("#2E7D32");
+            valueColor = Color.parseColor("#33691E");
+        }
+        itemView.setBackgroundColor(backgroundColor);
 
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -242,11 +258,12 @@ public class DetectionDetailDialog extends DialogFragment {
         TextView iconText = new TextView(context);
         iconText.setText(detail.getIcon() + " ");
         iconText.setTextSize(14);
+        iconText.setTextColor(titleColor);
 
         TextView itemName = new TextView(context);
         itemName.setText(detail.getItem());
         itemName.setTextSize(14);
-        itemName.setTextColor(Color.parseColor("#333333"));
+        itemName.setTextColor(titleColor);
         itemName.setTypeface(null, android.graphics.Typeface.BOLD);
 
         headerRow.addView(iconText);
@@ -256,7 +273,7 @@ public class DetectionDetailDialog extends DialogFragment {
         TextView valueText = new TextView(context);
         valueText.setText(detail.getValue());
         valueText.setTextSize(13);
-        valueText.setTextColor(Color.parseColor("#666666"));
+        valueText.setTextColor(valueColor);
         valueText.setPadding(0, 4, 0, 0);
         valueText.setLineSpacing(4, 1.0f);
 
@@ -286,6 +303,33 @@ public class DetectionDetailDialog extends DialogFragment {
         itemView.addView(layerTag);
 
         return itemView;
+    }
+
+    private boolean isRiskDetail(DetectionItem.DetectionDetail detail) {
+        String icon = detail.getIcon();
+        return equalsIcon(icon, "RISK")
+                || equalsIcon(icon, "VPN")
+                || equalsIcon(icon, "ROOT")
+                || equalsIcon(icon, "HOOK")
+                || equalsIcon(icon, "EMULATOR");
+    }
+
+    private boolean isWarningDetail(DetectionItem.DetectionDetail detail) {
+        String icon = detail.getIcon();
+        return equalsIcon(icon, "WARN")
+                || equalsIcon(icon, "WARNING")
+                || equalsIcon(icon, "PROXY");
+    }
+
+    private boolean isSafeDetail(DetectionItem.DetectionDetail detail) {
+        String icon = detail.getIcon();
+        return equalsIcon(icon, "SAFE")
+                || equalsIcon(icon, "OK")
+                || equalsIcon(icon, "SKIP");
+    }
+
+    private boolean equalsIcon(String icon, String expected) {
+        return icon != null && expected.equalsIgnoreCase(icon.trim());
     }
 
     @NonNull

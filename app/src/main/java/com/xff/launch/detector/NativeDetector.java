@@ -364,6 +364,12 @@ public class NativeDetector {
     /** Get /etc/hosts file hash via syscall */
     public native String getHostsHashSyscall();
 
+    /** Enumerate VPN-like interfaces through native ioctl(SIOCGIF*) and getifaddrs() */
+    public native String getVpnNativeSignals();
+
+    /** Read proxy-related environment variables and Android system properties through native APIs */
+    public native String getProxyNativeSignals();
+
     /** Get SELinux state "Enforcing|u:r:untrusted_app" via native */
     public native String getSELinuxFingerprintNative();
     /** Get SELinux state via syscall */
