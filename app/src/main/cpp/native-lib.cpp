@@ -4,6 +4,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <cctype>
+#include <cstddef>
+#include <cerrno>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -13,6 +15,7 @@
 #include <sys/utsname.h>
 #include <sys/syscall.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <arpa/inet.h>
@@ -2651,6 +2654,84 @@ Java_com_xff_launch_detector_NativeDetector_probeDevPropertyAccess(
         path += ctx;
         try_open(path.c_str(), 0, ctx);
     }
+    return env->NewStringUTF(out.c_str());
+}
+
+static const char* local_socket_errno_name(int e) {
+    switch (e) {
+        case 0: return "OK";
+        case EACCES: return "EACCES";
+        case EPERM: return "EPERM";
+        case ENOENT: return "ENOENT";
+        case ECONNREFUSED: return "ECONNREFUSED";
+        case EPROTOTYPE: return "EPROTOTYPE";
+        case EINVAL: return "EINVAL";
+        default: return "ERR";
+    }
+}
+
+static std::string probe_adbd_local_socket() {
+    const char* path = "/dev/socket/adbd";
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        int err = errno;
+        return "adbd_socket hit=0 errno=" + std::to_string(err)
+               + " name=" + local_socket_errno_name(err)
+               + " detail=socket_failed target=/dev/socket/adbd";
+    }
+
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    errno = 0;
+    int rc = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    int err = rc == 0 ? 0 : errno;
+    close(fd);
+
+    bool hit = rc < 0 && err == EACCES;
+    return "adbd_socket hit=" + std::string(hit ? "1" : "0")
+           + " errno=" + std::to_string(err)
+           + " name=" + local_socket_errno_name(err)
+           + " detail=" + (rc == 0 ? "connect_success" : "connect_failed")
+           + " target=/dev/socket/adbd type=AF_UNIX/SOCK_DGRAM";
+}
+
+static std::string probe_jdwp_control_socket() {
+    const char* name = "jdwp-control";
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        int err = errno;
+        return "jdwp_control hit=0 errno=" + std::to_string(err)
+               + " name=" + local_socket_errno_name(err)
+               + " detail=socket_failed target=@jdwp-control";
+    }
+
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    addr.sun_path[0] = '\0';
+    memcpy(addr.sun_path + 1, name, strlen(name));
+    socklen_t len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + strlen(name));
+
+    errno = 0;
+    int rc = connect(fd, reinterpret_cast<sockaddr*>(&addr), len);
+    int err = rc == 0 ? 0 : errno;
+    close(fd);
+
+    bool hit = rc == 0;
+    return "jdwp_control hit=" + std::string(hit ? "1" : "0")
+           + " errno=" + std::to_string(err)
+           + " name=" + local_socket_errno_name(err)
+           + " detail=" + (rc == 0 ? "connect_success" : "connect_failed")
+           + " target=@jdwp-control type=AF_UNIX/SOCK_SEQPACKET";
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getAdbLocalSocketSignals(
+        JNIEnv* env, jobject /*thiz*/) {
+    std::string out = probe_adbd_local_socket();
+    out += "\n";
+    out += probe_jdwp_control_socket();
     return env->NewStringUTF(out.c_str());
 }
 

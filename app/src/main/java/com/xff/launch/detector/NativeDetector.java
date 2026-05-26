@@ -405,6 +405,14 @@ public class NativeDetector {
      */
     public native String probeDevPropertyAccess();
 
+    /**
+     * Probe Android local sockets related to adbd and JDWP control.
+     * Returns one line per probe:
+     *   adbd_socket hit=<0|1> errno=<n> detail=...
+     *   jdwp_control hit=<0|1> errno=<n> detail=...
+     */
+    public native String getAdbLocalSocketSignals();
+
     /** Compare mmap vs __system_property_get for 5 key properties, returns mismatch count */
     public native int checkPropertyMmapConsistency();
 

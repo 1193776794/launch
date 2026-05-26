@@ -114,12 +114,18 @@ public class DebugDetector {
     public DetectionItem detectJdwp() {
         DetectionItem item = new DetectionItem("JDWP 检测", "检测 Java 调试协议");
 
-        boolean detected = checkJdwp();
-        item.setLayerResult(DetectionLayer.JAVA, detected);
+        String localSocketReport = getAdbLocalSocketReport();
+        boolean jdwpControlDetected = hasLocalSocketHit(localSocketReport, "jdwp_control");
+        boolean javaJdwpDetected = checkJdwp();
+        boolean detected = javaJdwpDetected || jdwpControlDetected;
+        item.setLayerResult(DetectionLayer.JAVA, javaJdwpDetected);
+        item.setLayerResult(DetectionLayer.NATIVE, jdwpControlDetected);
+        addLocalSocketSignalDetail(item, localSocketReport, "jdwp_control",
+                "JDWP 本地 socket", "@jdwp-control");
 
         if (detected) {
             item.setStatus(DetectionStatus.RISK);
-            item.setDetail("检测到 JDWP");
+            item.setDetail(jdwpControlDetected ? "检测到 @jdwp-control" : "检测到 JDWP");
 
             // 添加详细检测信息
             collectJdwpDetails(item);
@@ -303,7 +309,7 @@ public class DebugDetector {
                 "persist.sys.usb.config", "sys.usb.config", "sys.usb.state",
                 "service.adb.tcp.port", "service.adb.tls.port",
                 "persist.adb.tls_server.enable", "sys.usb.ffs.ready",
-                "persist.sys.usb.reboot.func", "init.svc.adbd",
+                "persist.sys.usb.reboot.func", "service.adb.root", "init.svc.adbd",
                 // bootloader (京东 b.a 检测点)
                 "ro.boot.verifiedbootstate", "ro.boot.vbmeta.device_state",
                 // Riru / hook (京东 b.b 检测点)
@@ -530,6 +536,7 @@ public class DebugDetector {
                 "init.svc.adbd",
                 "service.adb.tcp.port",
                 "service.adb.tls.port",
+                "service.adb.root",
                 "persist.adb.tls_server.enable"
         };
         Map<String, String> props = readPropertiesViaApi(keys);
@@ -537,14 +544,18 @@ public class DebugDetector {
         boolean initRunning = "running".equals(props.get("init.svc.adbd"));
         int tcpPort = parseAdbPort(props.get("service.adb.tcp.port"));
         int tlsPort = parseAdbPort(props.get("service.adb.tls.port"));
+        boolean adbRootEnabled = isAdbRootEnabled(props.get("service.adb.root"));
         boolean tlsServerEnabled = isTruthy(props.get("persist.adb.tls_server.enable"));
-        boolean propertyRisk = initRunning || tcpPort > 0 || tlsPort > 0 || tlsServerEnabled;
+        boolean propertyRisk = initRunning || tcpPort > 0 || tlsPort > 0
+                || adbRootEnabled || tlsServerEnabled;
 
         for (String key : keys) {
             String value = props.get(key);
             boolean hit;
             if ("init.svc.adbd".equals(key)) {
                 hit = "running".equals(value);
+            } else if ("service.adb.root".equals(key)) {
+                hit = isAdbRootEnabled(value);
             } else if ("persist.adb.tls_server.enable".equals(key)) {
                 hit = isTruthy(value);
             } else {
@@ -584,19 +595,26 @@ public class DebugDetector {
 
         boolean processRisk = !processScan.matches.isEmpty();
         boolean portRisk = !openPorts.isEmpty();
+        String localSocketReport = getAdbLocalSocketReport();
+        boolean adbdSocketRisk = hasLocalSocketHit(localSocketReport, "adbd_socket");
+        addLocalSocketSignalDetail(item, localSocketReport, "adbd_socket",
+                "adbd 本地 socket", "/dev/socket/adbd");
 
         item.setLayerResult(DetectionLayer.JAVA, propertyRisk || portRisk);
+        item.setLayerResult(DetectionLayer.NATIVE, adbdSocketRisk);
         item.setLayerResult(DetectionLayer.SYSCALL, processRisk);
 
-        if (propertyRisk || processRisk || portRisk) {
+        if (propertyRisk || processRisk || portRisk || adbdSocketRisk) {
             item.setStatus(DetectionStatus.RISK);
             StringBuilder detail = new StringBuilder();
             if (initRunning) detail.append("init.svc.adbd=running; ");
             if (tcpPort > 0) detail.append("service.adb.tcp.port=").append(tcpPort).append("; ");
             if (tlsPort > 0) detail.append("service.adb.tls.port=").append(tlsPort).append("; ");
+            if (adbRootEnabled) detail.append("service.adb.root=").append(formatValue(props.get("service.adb.root"))).append("; ");
             if (tlsServerEnabled) detail.append("persist.adb.tls_server.enable=1; ");
             if (processRisk) detail.append("发现 adbd 进程; ");
             if (portRisk) detail.append("ADB 端口可连接 ").append(openPorts).append("; ");
+            if (adbdSocketRisk) detail.append("/dev/socket/adbd connect EACCES; ");
             item.setDetail(detail.toString().trim());
         } else {
             item.setStatus(DetectionStatus.SAFE);
@@ -606,7 +624,8 @@ public class DebugDetector {
         Log.i(TAG, "adbd-runtime: props=" + props
                 + " process=" + processScan.matches
                 + " probed=" + probePorts
-                + " open=" + openPorts);
+                + " open=" + openPorts
+                + " localSocket=" + localSocketReport);
         logItemResult(item);
         return item;
     }
@@ -726,7 +745,6 @@ public class DebugDetector {
     };
 
     private static final String[] USB_RUNTIME_EXISTENCE_PATHS = {
-            "/dev/usb-ffs/adb",
             "/dev/usb-ffs/adb/ep0",
             "/config/usb_gadget/g1/functions/ffs.adb"
     };
@@ -934,6 +952,46 @@ public class DebugDetector {
         return new FileExistResult(false, "", DetectionLayer.SYSCALL);
     }
 
+    private String getAdbLocalSocketReport() {
+        try {
+            String report = nativeDetector.getAdbLocalSocketSignals();
+            return report == null ? "" : report.trim();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static void addLocalSocketSignalDetail(DetectionItem item, String report,
+                                                   String prefix, String category, String name) {
+        String line = findLocalSocketSignalLine(report, prefix);
+        if (!isPresent(line)) {
+            item.addDetectionDetail(category, name,
+                    "native local socket probe unavailable",
+                    DetectionLayer.NATIVE, "INFO");
+            return;
+        }
+
+        item.addDetectionDetail(category, name, line,
+                DetectionLayer.NATIVE, hasLocalSocketHit(line, prefix) ? "RISK" : "SAFE");
+    }
+
+    private static boolean hasLocalSocketHit(String report, String prefix) {
+        String line = findLocalSocketSignalLine(report, prefix);
+        return line.contains("hit=1");
+    }
+
+    private static String findLocalSocketSignalLine(String report, String prefix) {
+        if (report == null || report.isEmpty()) return "";
+        String[] lines = report.split("\\r?\\n");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith(prefix + " ")) {
+                return trimmed;
+            }
+        }
+        return "";
+    }
+
     private static boolean isAdbdProcess(String cmdline, String comm) {
         if ("adbd".equals(comm)) return true;
         if (cmdline == null || cmdline.isEmpty()) return false;
@@ -1012,6 +1070,14 @@ public class DebugDetector {
         String v = value.trim().toLowerCase(java.util.Locale.US);
         return "1".equals(v) || "true".equals(v) || "enabled".equals(v)
                 || "on".equals(v) || "yes".equals(v);
+    }
+
+    private static boolean isAdbRootEnabled(String value) {
+        if (value == null) return false;
+        String v = value.trim().toLowerCase(java.util.Locale.US);
+        return "1".equals(v) || "true".equals(v) || "enabled".equals(v)
+                || "on".equals(v) || "yes".equals(v)
+                || "root".equals(v) || "running".equals(v);
     }
 
     private static boolean containsAdbFunction(String value) {
@@ -1777,6 +1843,7 @@ public class DebugDetector {
             {"sys.usb.ffs.ready",      "ffs_prop",                  "usb_prop"},
             {"service.adb.tcp.port",   "adbd_config_prop",          "usb_prop"},
             {"service.adb.tls.port",   "adbd_config_prop",          "adb_prop"},
+            {"service.adb.root",       "adbd_config_prop",          "adbd_prop"},
             {"persist.adb.tls_server.enable", "adbd_config_prop",   "adb_prop"},
             {"persist.sys.usb.reboot.func", "usb_prop",             "system_prop"},
             {"init.svc.adbd",          "init_service_status_prop",  "default_prop"},
@@ -1801,6 +1868,8 @@ public class DebugDetector {
             case "service.adb.tcp.port":
             case "service.adb.tls.port":
                 return !"-1".equals(value) && !"0".equals(value);
+            case "service.adb.root":
+                return isAdbRootEnabled(value);
             case "persist.adb.tls_server.enable":
                 return isTruthy(value);
             case "init.svc.adbd":
