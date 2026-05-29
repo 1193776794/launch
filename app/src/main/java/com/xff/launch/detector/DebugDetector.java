@@ -19,9 +19,11 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Debug detection with multi-layer support
@@ -39,32 +41,150 @@ public class DebugDetector {
     }
 
     /**
-     * Detect USB debugging status
+     * Detect USB debugging status.
+     *
+     * 单读 Settings.Global.ADB_ENABLED 不可靠 —— MIUI / Xposed / hook 框架经常拦截
+     * 这个 ContentProvider 调用或返回旧值（实测 MIUI 上 settings get 显示 1、但
+     * Settings.Global.getInt 读出 0）。
+     *
+     * 改成多源融合：
+     *  · JAVA    层 — Settings.Global.ADB_ENABLED
+     *  · NATIVE  层 — Native syscall mmap 读 sys.usb.config / sys.usb.state /
+     *                 init.svc.adbd / persist.sys.usb.config，任一含 "adb" 或 adbd=running 即开
+     *  · SYSCALL 层 — Java FileChannel.map 旁路同样的几条属性
+     * 任一源说"开"即判 WARNING（USB 调试开），并把跨源不一致单独列为 hook 嫌疑。
      */
     public DetectionItem detectUsbDebugging() {
-        DetectionItem item = new DetectionItem("USB 调试", "检测 USB 调试是否开启");
+        DetectionItem item = new DetectionItem("USB 调试",
+                "Settings + sys.usb.config / init.svc.adbd 多源融合");
 
-        boolean enabled = false;
+        // ===== JAVA 层 Settings =====
+        int adbEnabledSetting = -1;
         try {
-            enabled = Settings.Global.getInt(context.getContentResolver(),
-                    Settings.Global.ADB_ENABLED, 0) == 1;
-        } catch (Exception ignored) {
+            adbEnabledSetting = Settings.Global.getInt(context.getContentResolver(),
+                    Settings.Global.ADB_ENABLED, -1);
+        } catch (Throwable ignored) {
         }
+        boolean settingsSaysOn = adbEnabledSetting == 1;
 
-        item.setLayerResult(DetectionLayer.JAVA, enabled);
+        // ===== NATIVE / SYSCALL 层：通过三路属性源旁证 =====
+        String[][] defs = {
+                {"sys.usb.config",         "usb_control_prop",          "usb_prop"},
+                {"sys.usb.state",          "usb_control_prop",          "usb_prop"},
+                {"init.svc.adbd",          "init_service_status_prop",  "default_prop"},
+                {"persist.sys.usb.config", "system_prop",               "usb_prop"},
+        };
+        String[] keys = propKeys(defs);
 
-        if (enabled) {
+        Map<String, String> apiVals = readPropertiesViaApi(keys);
+        Map<String, String> javaMmapVals = readPropertiesViaMmap(keys);
+        if (javaMmapVals == null) javaMmapVals = java.util.Collections.emptyMap();
+        Map<String, String> nativeMmapVals = readPropertiesByContext(defs);
+
+        // sys.usb.config / sys.usb.state / persist.sys.usb.config 是「USB function 列表」，
+        // 含 "adb" 即说明 USB function 已切到 ADB 通道（调试开）。
+        // init.svc.adbd == "running" 是 adbd 守护进程在跑（也是开关明确为开的标志）。
+        boolean nativeSaysOn = anySourceHit(apiVals, javaMmapVals, nativeMmapVals, "sys.usb.config", VAL_CONTAINS_ADB)
+                || anySourceHit(apiVals, javaMmapVals, nativeMmapVals, "sys.usb.state", VAL_CONTAINS_ADB)
+                || anySourceHit(apiVals, javaMmapVals, nativeMmapVals, "init.svc.adbd", VAL_EQ_RUNNING);
+
+        // SYSCALL 层（Java FileChannel.map 旁路）单独算一遍，便于跨层不一致诊断
+        boolean syscallSaysOn = valueHits(javaMmapVals.get("sys.usb.config"), VAL_CONTAINS_ADB)
+                || valueHits(javaMmapVals.get("sys.usb.state"), VAL_CONTAINS_ADB)
+                || valueHits(javaMmapVals.get("init.svc.adbd"), VAL_EQ_RUNNING);
+
+        item.setLayerResult(DetectionLayer.JAVA, settingsSaysOn);
+        item.setLayerResult(DetectionLayer.NATIVE, nativeSaysOn);
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallSaysOn);
+
+        boolean isOn = settingsSaysOn || nativeSaysOn || syscallSaysOn;
+
+        if (isOn) {
             item.setStatus(DetectionStatus.WARNING);
-            item.setDetail("已开启");
+            StringBuilder d = new StringBuilder("已开启");
+            if (settingsSaysOn) d.append("; Settings=1");
+            String anyUsbCfg = firstNonEmpty(apiVals.get("sys.usb.config"),
+                    javaMmapVals.get("sys.usb.config"), nativeMmapVals.get("sys.usb.config"));
+            if (anyUsbCfg != null && anyUsbCfg.contains("adb")) {
+                d.append("; sys.usb.config=").append(anyUsbCfg);
+            }
+            String anyAdbd = firstNonEmpty(apiVals.get("init.svc.adbd"),
+                    javaMmapVals.get("init.svc.adbd"), nativeMmapVals.get("init.svc.adbd"));
+            if ("running".equals(anyAdbd)) d.append("; adbd=running");
+            item.setDetail(d.toString());
 
-            // 添加详细检测信息
-            collectUsbDebuggingDetails(item);
+            collectUsbDebuggingDetails(item, adbEnabledSetting,
+                    apiVals, javaMmapVals, nativeMmapVals);
         } else {
             item.setStatus(DetectionStatus.SAFE);
             item.setDetail("已关闭");
         }
 
+        // 跨源不一致 = 强 hook 嫌疑（典型：Settings 报 0、但 sys.usb.config=adb）
+        if (settingsSaysOn != (nativeSaysOn || syscallSaysOn)) {
+            item.addDetectionDetail("⚠️ 异常情况",
+                    "Settings 与属性源结论不一致 (疑似 ContentProvider/属性被 hook)",
+                    "Settings.ADB_ENABLED=" + adbEnabledSetting
+                            + "\nsys.usb.config: API=" + formatValue(apiVals.get("sys.usb.config"))
+                            + " / NativeMmap=" + formatValue(nativeMmapVals.get("sys.usb.config"))
+                            + " / JavaMmap=" + formatValue(javaMmapVals.get("sys.usb.config"))
+                            + "\ninit.svc.adbd: API=" + formatValue(apiVals.get("init.svc.adbd"))
+                            + " / NativeMmap=" + formatValue(nativeMmapVals.get("init.svc.adbd"))
+                            + " / JavaMmap=" + formatValue(javaMmapVals.get("init.svc.adbd")),
+                    DetectionLayer.NATIVE, "🚨");
+            if (item.getStatus() != DetectionStatus.WARNING) {
+                item.setStatus(DetectionStatus.RISK);
+            }
+        }
+
         return item;
+    }
+
+    // 谓词：用于 anySourceHit / valueHits
+    private static final int VAL_CONTAINS_ADB = 1;
+    private static final int VAL_EQ_RUNNING = 2;
+    private static final int VAL_TRUTHY = 3;          // "1"/"true"/"on"/"yes"/"enabled"
+    private static final int VAL_TRUTHY_ADB_ROOT = 4; // 还接受 "root"/"running"
+
+    private static boolean valueHits(String v, int predicate) {
+        if (v == null || v.isEmpty()) return false;
+        switch (predicate) {
+            case VAL_CONTAINS_ADB: return v.contains("adb");
+            case VAL_EQ_RUNNING:   return "running".equals(v);
+            case VAL_TRUTHY: {
+                String t = v.trim().toLowerCase(java.util.Locale.US);
+                return "1".equals(t) || "true".equals(t) || "on".equals(t)
+                        || "yes".equals(t) || "enabled".equals(t);
+            }
+            case VAL_TRUTHY_ADB_ROOT: {
+                String t = v.trim().toLowerCase(java.util.Locale.US);
+                return "1".equals(t) || "true".equals(t) || "on".equals(t)
+                        || "yes".equals(t) || "enabled".equals(t)
+                        || "root".equals(t) || "running".equals(t);
+            }
+            default: return false;
+        }
+    }
+
+    private static boolean anySourceHit(Map<String, String> a, Map<String, String> b,
+                                        Map<String, String> c, String key, int predicate) {
+        return valueHits(a.get(key), predicate)
+                || valueHits(b.get(key), predicate)
+                || valueHits(c.get(key), predicate);
+    }
+
+    private static String firstNonEmpty(String... candidates) {
+        for (String s : candidates) {
+            if (s != null && !s.isEmpty()) return s;
+        }
+        return null;
+    }
+
+    /** 把 String[][]{key, ctx1, ctx2} 的第 0 列提成 String[] keys 用于属性读取。 */
+    private static String[] propKeys(String[][] defs) {
+        String[] keys = new String[defs.length];
+        for (int i = 0; i < defs.length; i++) keys[i] = defs[i][0];
+        return keys;
     }
 
     /**
@@ -104,24 +224,224 @@ public class DebugDetector {
     }
 
     /**
-     * Detect JDWP (Java Debug Wire Protocol)
+     * Detect JDWP (Java Debug Wire Protocol).
+     *
+     * JDWP 在 Android 上的真实运行路径（AOSP 9+）：
+     *   adbd ──@jdwp-control unix abstract socket──> ART runtime
+     *                                                 │
+     *                                                 ├─ libadbconnection.so (启用 JDWP 即加载)
+     *                                                 ├─ "ADB-JDWP Connection Control Thread"
+     *                                                 └─ attach 时 dlopen libopenjdkjvmti.so
+     *
+     * 因此 TracerPid > 0 跟 JDWP 完全无关（那是 ptrace）。本检测按真正的 JDWP 指标分三层：
+     *
+     *   JAVA 层（易被 hook）:
+     *     · Debug.isDebuggerConnected() / Debug.waitingForDebugger() — VMDebug 直读 JDWP 状态
+     *     · ApplicationInfo FLAG_DEBUGGABLE — App 是否允许 JDWP attach
+     *     · Java 线程枚举 — 找 JDWP/ADB-JDWP/AdbConnection 命名
+     *     · /proc/net/unix 文件读 — 找 @jdwp 抽象 socket
+     *
+     *   NATIVE 层（syscall_open + syscall_read 绕 libc 内联 hook）:
+     *     · /proc/self/maps 命中 libadbconnection.so / libopenjdkjvmti.so / libjdwp.so
+     *     · /proc/net/unix @jdwp 数量
+     *     · /proc/self/task/*\/comm JDWP 线程列表
+     *
+     *   SYSCALL 层（已有 mmap 直读 /dev/__properties__）:
+     *     · dalvik.vm.jdwp-provider 值 — adbconnection (默认开启) / internal (旧版开启) / none (禁用)
+     *
+     *   一致性校验：Java 与 Native 检测结果出现分歧 → 强 hook 嫌疑（Java 反射被静默化或
+     *   /proc 被 hook 屏蔽），单独标记为异常情况。
      */
     public DetectionItem detectJdwp() {
-        DetectionItem item = new DetectionItem("JDWP 检测", "检测 Java 调试协议");
+        DetectionItem item = new DetectionItem("JDWP 检测",
+                "JDWP / @jdwp-control / libadbconnection 多层检测");
 
-        boolean detected = checkJdwp();
-        item.setLayerResult(DetectionLayer.JAVA, detected);
-
-        if (detected) {
-            item.setStatus(DetectionStatus.RISK);
-            item.setDetail("检测到 JDWP");
-
-            // 添加详细检测信息
-            collectJdwpDetails(item);
-        } else {
-            item.setStatus(DetectionStatus.SAFE);
-            item.setDetail("未检测到");
+        // ===== JAVA 层 =====
+        boolean debuggerConnected = false;
+        boolean waitingForDebugger = false;
+        try {
+            debuggerConnected = Debug.isDebuggerConnected();
+            waitingForDebugger = Debug.waitingForDebugger();
+        } catch (Throwable ignored) {
         }
+        boolean appDebuggable = isAppDebuggable();
+        String[] javaThreadCats = scanJavaThreadsForJdwpByKind();
+        String javaThreadHitsCtl = javaThreadCats[0];
+        String javaThreadHitsXport = javaThreadCats[1];
+        int javaUnixSocketsTotal = countJdwpUnixSocketsJava();
+        int javaUnixSocketsSelf = countJdwpUnixSocketsForSelfJava();
+
+        // 真 attach 信号：
+        //   · Debug API 明确报告
+        //   · 当前 PID 自己的 @jdwp socket 存在
+        //   · post-attach transport 线程命中（"JDWP Transport/Event/Command/Helper", "JVMTI Agent"）
+        // 弱信号（仅"JDWP 通道可用"，不代表已 attach）：control 线程命名、全局 @jdwp 计数
+        //   ↳ 在任何 FLAG_DEBUGGABLE app 上都常驻，不能当 RISK
+        boolean javaHit = debuggerConnected || waitingForDebugger
+                || javaUnixSocketsSelf > 0 || !javaThreadHitsXport.isEmpty();
+        // layer 维度 "Java 层能否观察到 JDWP 相关信号"，含 attach + capability。
+        // 这是 dialog "✓检测到 / ✗未检测到" 用的，反映这层对 JDWP 的可见性，
+        // 是否上 RISK 由整体 status 判定（attach vs capability）。
+        boolean javaLayerObserved = javaHit
+                || !javaThreadHitsCtl.isEmpty()
+                || javaUnixSocketsTotal > 0;
+        item.setLayerResult(DetectionLayer.JAVA, javaLayerObserved);
+
+        // ===== NATIVE 层 =====
+        Map<String, String> nativeReport;
+        try {
+            nativeReport = parseKeyValueReport(nativeDetector.getJdwpDetectionReport());
+            Log.i(TAG, "jdwp-report: " + nativeReport);
+        } catch (Throwable t) {
+            nativeReport = java.util.Collections.emptyMap();
+        }
+        boolean adbConnLoaded = "1".equals(nativeReport.get("ADBCONN"));
+        boolean jvmtiLoaded = "1".equals(nativeReport.get("JVMTI"));
+        int nativeUnixSocketsTotal = parseIntSafe(nativeReport.get("JDWP_SOCK"), 0);
+        int nativeUnixSocketsSelf = parseIntSafe(nativeReport.get("JDWP_SOCK_SELF"), 0);
+        String nativeThreadHitsCtl = nativeReport.getOrDefault("JDWP_THREADS_CTL", "");
+        String nativeThreadHitsXport = nativeReport.getOrDefault("JDWP_THREADS_XPORT", "");
+
+        // 主动 connect 探测结果（魔改版思路：不扫 /proc，syscall connect 探活）
+        // - adbdSockHit=1 (EACCES) → adbd 活着，只是 SELinux 不让我连（正常）
+        // - jdwpCtlHit=1 (connect 成功) → 系统侧 JDWP 通道已就位、accept 了我们 → capability
+        //   注：仍非 attach 凭证；attach 凭证看 libopenjdkjvmti.so / transport thread
+        boolean adbdSockHit = "1".equals(nativeReport.get("ADBD_SOCK_HIT"));
+        int adbdSockErrno = parseIntSafe(nativeReport.get("ADBD_SOCK_ERRNO"), -1);
+        String adbdSockName = nativeReport.getOrDefault("ADBD_SOCK_NAME", "");
+        boolean jdwpCtlHit = "1".equals(nativeReport.get("JDWP_CTL_HIT"));
+        int jdwpCtlErrno = parseIntSafe(nativeReport.get("JDWP_CTL_ERRNO"), -1);
+        String jdwpCtlName = nativeReport.getOrDefault("JDWP_CTL_NAME", "");
+
+        // 真 attach 信号：
+        //   · libopenjdkjvmti.so / libjdwp.so dlopen（attach 时才加载）
+        //   · 当前 PID 的 @jdwp socket 存在
+        //   · transport 线程命中（同 Java 层）
+        // 弱信号：libadbconnection.so（ART 对任何 debuggable app 都加载）、控制线程命名、
+        //   /proc/net/unix 里别的进程的 @jdwp 项 — 这些都不算 RISK
+        boolean nativeHit = jvmtiLoaded || nativeUnixSocketsSelf > 0
+                || !nativeThreadHitsXport.isEmpty();
+        // Native 层可观察信号 (含 capability)
+        boolean nativeLayerObserved = nativeHit
+                || adbConnLoaded
+                || !nativeThreadHitsCtl.isEmpty()
+                || nativeUnixSocketsTotal > 0;
+        item.setLayerResult(DetectionLayer.NATIVE, nativeLayerObserved);
+
+        // 仅作展示用的"JDWP 通道可用"指标
+        boolean jdwpCapability = adbConnLoaded
+                || !javaThreadHitsCtl.isEmpty() || !nativeThreadHitsCtl.isEmpty()
+                || javaUnixSocketsTotal > 0 || nativeUnixSocketsTotal > 0
+                || jdwpCtlHit || adbdSockHit;
+
+        // ===== SYSCALL 层: dalvik.vm.jdwp-provider via mmap =====
+        String provider = "";
+        try {
+            provider = nativeDetector.readDevPropertyMmap("dalvik.vm.jdwp-provider");
+            if (provider == null) provider = "";
+        } catch (Throwable ignored) {
+        }
+        // adbconnection (默认) / internal (旧版) → JDWP 路径可用；none → 禁用
+        boolean providerEnables = !provider.isEmpty() && !"none".equalsIgnoreCase(provider);
+        // Syscall 层可观察信号：provider 属性 + 主动 connect 探测 (用 syscall socket+connect)
+        boolean syscallLayerObserved = providerEnables || jdwpCtlHit || adbdSockHit;
+        item.setLayerResult(DetectionLayer.SYSCALL, syscallLayerObserved);
+
+        // ===== 聚合判定 =====
+        // jdwpReady = 系统侧 JDWP 通道是否准备好。多源择一即可：
+        //   · provider 属性可读且非 none （旧路，但 MIUI/HarmonyOS 等 ROM 上经常读不到）
+        //   · jdwpCtlHit (主动 connect @jdwp-control 成功) — 最直接的"门开着"证据
+        //   · adbConnLoaded + 控制线程存在 (jdwpCapability) — ART 已加载 JDWP 通道
+        // 任一即视为系统 JDWP capability 就位。
+        boolean jdwpReady = providerEnables || jdwpCtlHit || jdwpCapability;
+
+        // 统计有多少层观察到 JDWP 信号（attach 或 capability 都算），用于 verdict 升级
+        int layerObservedCount = (javaLayerObserved ? 1 : 0)
+                + (nativeLayerObserved ? 1 : 0)
+                + (syscallLayerObserved ? 1 : 0);
+
+        if (javaHit || nativeHit) {
+            // 真 attach 凭证命中：debugger 连了 / libopenjdkjvmti 加载 / transport 线程 / @jdwp-self
+            item.setStatus(DetectionStatus.RISK);
+            StringBuilder d = new StringBuilder("JDWP 活跃: ");
+            if (debuggerConnected) d.append("Debugger已连; ");
+            if (waitingForDebugger) d.append("等待调试器; ");
+            if (jvmtiLoaded) d.append("libopenjdkjvmti(attach时dlopen); ");
+            int selfSock = Math.max(javaUnixSocketsSelf, nativeUnixSocketsSelf);
+            if (selfSock > 0) d.append("@jdwp-self x").append(selfSock).append("; ");
+            if (!nativeThreadHitsXport.isEmpty() || !javaThreadHitsXport.isEmpty()) {
+                d.append("JDWP transport线程; ");
+            }
+            item.setDetail(d.toString().trim());
+        } else if (jdwpReady && appDebuggable && layerObservedCount >= 2) {
+            // ≥2 层观察到 capability 信号 + app 可被 attach：JDWP 攻击面充分暴露，
+            // 即便此刻无 attach 也是高风险窗口（任何时候 jdb/Studio Profiler/Frida JVMTI
+            // 都能直接接管），判 RISK。
+            item.setStatus(DetectionStatus.RISK);
+            StringBuilder hint = new StringBuilder();
+            if (!provider.isEmpty()) hint.append("provider=").append(provider).append("; ");
+            if (jdwpCtlHit)          hint.append("@jdwp-control accept; ");
+            if (adbConnLoaded)       hint.append("libadbconnection 加载; ");
+            if (adbdSockHit)         hint.append("adbd 活(EACCES); ");
+            String h = hint.length() == 0 ? "" : " (" + hint.toString().trim() + ")";
+            item.setDetail("JDWP 攻击面就位 / " + layerObservedCount
+                    + " 层 capability 命中，可被随时 attach" + h);
+        } else if (jdwpReady && appDebuggable) {
+            // 仅 1 层 capability 信号 (弱) + app debuggable → WARNING
+            item.setStatus(DetectionStatus.WARNING);
+            StringBuilder hint = new StringBuilder();
+            if (!provider.isEmpty()) hint.append("provider=").append(provider).append("; ");
+            if (jdwpCtlHit)          hint.append("@jdwp-control accept; ");
+            if (adbConnLoaded)       hint.append("libadbconnection 加载; ");
+            if (adbdSockHit)         hint.append("adbd 活(EACCES); ");
+            String h = hint.length() == 0 ? "" : " (" + hint.toString().trim() + ")";
+            item.setDetail("JDWP 通道就位（弱信号） / 当前无调试器 attach" + h);
+        } else if (jdwpReady) {
+            // 系统侧就位，但 app 不 debuggable，外部无法 attach 上来
+            item.setStatus(DetectionStatus.SAFE);
+            StringBuilder hint = new StringBuilder();
+            if (!provider.isEmpty()) hint.append("provider=").append(provider).append("; ");
+            if (jdwpCtlHit)          hint.append("@jdwp-control accept; ");
+            String h = hint.length() == 0 ? "" : " (" + hint.toString().trim() + ")";
+            item.setDetail("JDWP 系统侧就位 / App 非 debuggable 无法 attach" + h);
+        } else {
+            // provider 不可读 + 无任何 capability 信号 + 无 attach → 真"没开 JDWP"
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail(provider.isEmpty()
+                    ? "JDWP 未启用"
+                    : "JDWP 未启用 (provider=" + provider + ")");
+        }
+
+        // 跨层不一致 = 强 hook 嫌疑（只比 attach 信号，不比 capability 噪声）
+        if (javaHit != nativeHit) {
+            item.addDetectionDetail("⚠️ 异常情况",
+                    "Java 与 Native 层 JDWP attach 信号不一致",
+                    "Java=" + javaHit + " / Native=" + nativeHit
+                            + "\n（Java 反射可能被屏蔽 或 /proc 路径被 hook 过滤）",
+                    DetectionLayer.NATIVE, "🚨");
+        }
+
+        collectJdwpDetails(item,
+                debuggerConnected, waitingForDebugger, appDebuggable,
+                javaThreadHitsCtl, javaThreadHitsXport,
+                javaUnixSocketsTotal, javaUnixSocketsSelf,
+                adbConnLoaded, jvmtiLoaded,
+                nativeUnixSocketsTotal, nativeUnixSocketsSelf,
+                nativeThreadHitsCtl, nativeThreadHitsXport,
+                provider,
+                adbdSockHit, adbdSockErrno, adbdSockName,
+                jdwpCtlHit, jdwpCtlErrno, jdwpCtlName);
+
+        Log.i(TAG, "jdwp-verdict: status=" + item.getStatus()
+                + " detail=" + item.getDetail()
+                + " javaHit=" + javaHit + " nativeHit=" + nativeHit
+                + " jvmti=" + jvmtiLoaded
+                + " xport[java=" + (!javaThreadHitsXport.isEmpty())
+                + ",native=" + (!nativeThreadHitsXport.isEmpty()) + "]"
+                + " selfSock[java=" + javaUnixSocketsSelf
+                + ",native=" + nativeUnixSocketsSelf + "]"
+                + " debugAPI[connected=" + debuggerConnected
+                + ",waiting=" + waitingForDebugger + "]");
 
         return item;
     }
@@ -267,6 +587,8 @@ public class DebugDetector {
         items.add(detectPtraceSelfProtection());
         items.add(detectAdbAndDebugSwitch());
         items.add(detectAdbConnection());
+        items.add(detectAdbdRuntime());
+        items.add(detectUsbFunctionsRuntime());
         items.add(detectPropertyAreaTampering());
         return items;
     }
@@ -309,12 +631,10 @@ public class DebugDetector {
             ByteBuffer buf = openPropertyMap(new File(DEV_PROPERTIES_ROOT, ctxName));
             if (buf == null) continue;
             totalFilesOpened++;
-//            Log.i(TAG,DEV_PROPERTIES_ROOT+"/"+ctxName);
             for (String key : sensitiveKeys) {
                 List<String> all = findAllValues(buf, key);
                 if (all.isEmpty()) continue;
                 matrix.computeIfAbsent(key, k -> new LinkedHashMap<>()).put(ctxName, all);
-//                Log.i(TAG,key + " : " + all.toString());
             }
         }
         // 兜底：旧版 Android 整目录是单文件
@@ -488,6 +808,687 @@ public class DebugDetector {
         return item;
     }
 
+    /**
+     * adbd daemon 运行态独立检测项。四轴融合判定，跟 detectAdbAndDebugSwitch /
+     * detectAdbConnection 的信源完全独立 —— hook 框架想全屏蔽需打四套。
+     *
+     * 学魔改版 detectAdbdRuntime 的设计 + 我们已有的三路属性基建：
+     *   · 属性轴   — 5 个 key (init.svc.adbd / service.adb.{tcp,tls}.port /
+     *                 service.adb.root / persist.adb.tls_server.enable) 走
+     *                 API + Native mmap + Java mmap 三路融合
+     *   · 进程轴   — 遍历 /proc 找 cmdline / comm == "adbd"
+     *                  ↳ 读 cmdline/comm 走 readSmallTextLayered (Java + syscall fallback)
+     *   · 端口轴   — 主动 TCP connect 探测 tcp.port / tls.port / 5555
+     *   · socket 轴 — /dev/socket/adbd connect EACCES (复用 ADBD_SOCK_HIT 字段)
+     */
+    public DetectionItem detectAdbdRuntime() {
+        DetectionItem item = new DetectionItem("adbd 运行态",
+                "属性 + /proc 进程 + TCP/TLS 端口 + /dev/socket/adbd 四轴融合");
+
+        // ===== 轴 1: 5 ADB 属性多路读 =====
+        String[][] defs = {
+                {"init.svc.adbd",                 "init_service_status_prop", "default_prop"},
+                {"service.adb.tcp.port",          "adbd_config_prop",         "usb_prop"},
+                {"service.adb.tls.port",          "adbd_config_prop",         "default_prop"},
+                {"service.adb.root",              "adbd_prop",                "default_prop"},
+                {"persist.adb.tls_server.enable", "adbd_config_prop",         "default_prop"},
+        };
+        String[] keys = propKeys(defs);
+
+        Map<String, String> apiVals = readPropertiesViaApi(keys);
+        Map<String, String> javaMmapVals = readPropertiesViaMmap(keys);
+        if (javaMmapVals == null) javaMmapVals = java.util.Collections.emptyMap();
+        Map<String, String> nativeMmapVals = readPropertiesByContext(defs);
+
+        boolean adbdRunning = anySourceHit(apiVals, javaMmapVals, nativeMmapVals,
+                "init.svc.adbd", VAL_EQ_RUNNING);
+        int tcpPort = bestAdbPort(apiVals, javaMmapVals, nativeMmapVals, "service.adb.tcp.port");
+        int tlsPort = bestAdbPort(apiVals, javaMmapVals, nativeMmapVals, "service.adb.tls.port");
+        boolean adbRoot = anySourceHit(apiVals, javaMmapVals, nativeMmapVals,
+                "service.adb.root", VAL_TRUTHY_ADB_ROOT);
+        boolean tlsEnabled = anySourceHit(apiVals, javaMmapVals, nativeMmapVals,
+                "persist.adb.tls_server.enable", VAL_TRUTHY);
+
+        boolean propAxisHit = adbdRunning || tcpPort > 0 || tlsPort > 0 || adbRoot || tlsEnabled;
+
+        // 每个 key 三路对比展示
+        for (String[] def : defs) {
+            String k = def[0];
+            String apiV = apiVals.get(k);
+            String natV = nativeMmapVals.get(k);
+            String javV = javaMmapVals.get(k);
+            if (apiV == null && natV == null && javV == null) continue;
+            int predicate;
+            if (k.equals("init.svc.adbd"))                          predicate = VAL_EQ_RUNNING;
+            else if (k.equals("service.adb.root"))                  predicate = VAL_TRUTHY_ADB_ROOT;
+            else if (k.equals("persist.adb.tls_server.enable"))     predicate = VAL_TRUTHY;
+            else                                                    predicate = -1; // 端口走数值判定
+            boolean hit;
+            if (predicate < 0) {
+                hit = parseAdbPort(apiV) > 0 || parseAdbPort(natV) > 0 || parseAdbPort(javV) > 0;
+            } else {
+                hit = valueHits(apiV, predicate) || valueHits(natV, predicate) || valueHits(javV, predicate);
+            }
+            String display = "API     = " + formatValue(apiV)
+                    + "\nNative  = " + formatValue(natV)
+                    + "\nJava    = " + formatValue(javV);
+            item.addDetectionDetail(hit ? "⚠️ adbd 属性命中" : "📄 adbd 属性",
+                    k, display, DetectionLayer.JAVA, hit ? "⚠️" : "📄");
+        }
+
+        // ===== 轴 2: /proc 扫 adbd 进程 =====
+        AdbdProcessScan scan = scanAdbdProcesses();
+        for (String hitDetail : scan.matches) {
+            item.addDetectionDetail("🔄 adbd 进程", "adbd", hitDetail,
+                    DetectionLayer.SYSCALL, "🚨");
+        }
+        if (scan.matches.isEmpty()) {
+            if (scan.procReadable) {
+                item.addDetectionDetail("🔍 /proc 扫描", "未发现 adbd",
+                        "已扫描 " + scan.checkedPids + " 个 pid，无命中",
+                        DetectionLayer.SYSCALL, "✅");
+            } else {
+                item.addDetectionDetail("🔍 /proc 扫描", "目录不可枚举",
+                        "/proc 不可读，无法扫描 adbd 进程（不影响其他检测）",
+                        DetectionLayer.SYSCALL, "ℹ️");
+            }
+        }
+
+        // ===== 轴 3: TCP/TLS 端口主动 connect =====
+        List<Integer> probePorts = new ArrayList<>();
+        if (tcpPort > 0) probePorts.add(tcpPort);
+        if (tlsPort > 0 && !probePorts.contains(tlsPort)) probePorts.add(tlsPort);
+        if (!probePorts.contains(5555)) probePorts.add(5555);
+
+        List<Integer> openPorts = new ArrayList<>();
+        for (int port : probePorts) {
+            if (probeLocalTcpPort(port)) openPorts.add(port);
+        }
+        for (int port : openPorts) {
+            String label;
+            if (port == tcpPort)      label = "service.adb.tcp.port = " + port;
+            else if (port == tlsPort) label = "service.adb.tls.port = " + port + " (Wireless Debugging TLS)";
+            else                       label = "默认 wireless adb 端口";
+            item.addDetectionDetail("🌐 ADB 端口", "TCP " + port,
+                    "127.0.0.1:" + port + " 可连接\n" + label,
+                    DetectionLayer.JAVA, "🚨");
+        }
+        if (openPorts.isEmpty()) {
+            item.addDetectionDetail("🌐 ADB 端口", "本机端口探测",
+                    "probed=" + probePorts + ", open=[]",
+                    DetectionLayer.JAVA, "✅");
+        }
+
+        // ===== 轴 4: /dev/socket/adbd connect EACCES (复用 native getJdwpDetectionReport) =====
+        Map<String, String> nativeReport;
+        try {
+            nativeReport = parseKeyValueReport(nativeDetector.getJdwpDetectionReport());
+        } catch (Throwable t) {
+            nativeReport = java.util.Collections.emptyMap();
+        }
+        boolean adbdSockHit = "1".equals(nativeReport.get("ADBD_SOCK_HIT"));
+        int adbdSockErrno = parseIntSafe(nativeReport.get("ADBD_SOCK_ERRNO"), -1);
+        String adbdSockName = nativeReport.getOrDefault("ADBD_SOCK_NAME", "");
+
+        {
+            String hint;
+            String icon;
+            if (adbdSockHit) {
+                hint = "SELinux 拒，adbd 在监听 → adbd 活";
+                icon = "⚠️";
+            } else if (adbdSockErrno == 111) {
+                hint = "ECONNREFUSED — adbd 不在监听";
+                icon = "✅";
+            } else if (adbdSockErrno == 2) {
+                hint = "ENOENT — /dev/socket/adbd 不存在";
+                icon = "✅";
+            } else if (adbdSockErrno == 0) {
+                hint = "connect 成功（异常 — 普通 untrusted_app 不应能连）";
+                icon = "🚨";
+            } else {
+                hint = "errno=" + adbdSockErrno;
+                icon = "ℹ️";
+            }
+            item.addDetectionDetail("🔌 主动 connect", "/dev/socket/adbd",
+                    "errno=" + adbdSockErrno + " (" + adbdSockName + ")\n" + hint,
+                    DetectionLayer.NATIVE, icon);
+        }
+
+        // ===== 聚合 =====
+        item.setLayerResult(DetectionLayer.JAVA, propAxisHit || !openPorts.isEmpty());
+        item.setLayerResult(DetectionLayer.NATIVE, adbdSockHit);
+        item.setLayerResult(DetectionLayer.SYSCALL, !scan.matches.isEmpty());
+
+        boolean anyHit = propAxisHit || !scan.matches.isEmpty() || !openPorts.isEmpty() || adbdSockHit;
+        if (anyHit) {
+            item.setStatus(DetectionStatus.RISK);
+            StringBuilder d = new StringBuilder();
+            if (adbdRunning) d.append("init.svc.adbd=running; ");
+            if (tcpPort > 0) d.append("tcp.port=").append(tcpPort).append("; ");
+            if (tlsPort > 0) d.append("tls.port=").append(tlsPort).append("; ");
+            if (adbRoot)     d.append("adb-root; ");
+            if (tlsEnabled)  d.append("tls_server 开; ");
+            if (!scan.matches.isEmpty()) d.append("adbd 进程 x").append(scan.matches.size()).append("; ");
+            if (!openPorts.isEmpty())    d.append("端口").append(openPorts).append("可连; ");
+            if (adbdSockHit)             d.append("/dev/socket/adbd EACCES; ");
+            item.setDetail(d.toString().trim());
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未发现 adbd 运行态证据");
+        }
+
+        Log.i(TAG, "adbd-runtime: api=" + apiVals
+                + " native=" + nativeMmapVals
+                + " java=" + javaMmapVals
+                + " procScan=" + scan.matches.size() + "/" + scan.checkedPids
+                + " openPorts=" + openPorts
+                + " adbdSock=" + adbdSockHit + "/" + adbdSockName);
+
+        return item;
+    }
+
+    /**
+     * USB Functions 运行态独立检测 —— 直接看"当前 USB 功能列表是否含 adb"，
+     * 而不是只看 ADB toggle 或 adbd 进程。命中维度：
+     *   · 属性轴   — 4 个 USB key 走三路融合 (API + Native mmap + Java mmap)
+     *                  - sys.usb.config / sys.usb.state 含 "adb" / "ffs.adb"
+     *                  - sys.usb.ffs.ready truthy
+     *                  - persist.sys.usb.config 含 "adb"
+     *   · framework — UsbManager.getCurrentFunctions() bitmask & USB_FUNCTION_ADB
+     *                  (反射调 system-hidden API，untrusted_app 通常被拒)
+     *   · sysfs    — /sys/class/android_usb/android0/{functions,state,enable} 文本扫
+     *   · configfs — /config/usb_gadget/g1/configs/b.1/ 目录列举找 "adb"/"ffs.adb"
+     *   · FFS      — /dev/usb-ffs/adb/ep0 等 FunctionFS 端点是否存在
+     *
+     * 抗 hook 设计：
+     *   - 三路属性源对比：API 被 hook 但属性区原始数据存在时三路不一致触发 RISK
+     *   - 文件读 走 readSmallTextLayered (Java FileReader + native readFileSyscall 兜底)
+     *   - 文件存在性 走 fileExistsLayered (java File.exists + native fileExistsSyscall 兜底)
+     */
+    public DetectionItem detectUsbFunctionsRuntime() {
+        DetectionItem item = new DetectionItem("USB Functions 运行态",
+                "USB functions/state/FunctionFS 与属性三路融合");
+
+        // ===== 三路属性读取 =====
+        String[] keys = propKeys(USB_RUNTIME_PROPS);
+
+        Map<String, String> apiVals = readPropertiesViaApi(keys);
+        Map<String, String> nativeVals = readPropertiesByContext(USB_RUNTIME_PROPS);
+        Map<String, String> javaMmapVals = readPropertiesViaMmap(keys);
+        if (javaMmapVals == null) javaMmapVals = java.util.Collections.emptyMap();
+
+        boolean apiAdb = hasCurrentUsbAdb(apiVals);
+        boolean nativeAdb = hasCurrentUsbAdb(nativeVals);
+        boolean javaAdb = hasCurrentUsbAdb(javaMmapVals);
+
+        boolean ffsReady = hasFfsReady(apiVals) || hasFfsReady(nativeVals) || hasFfsReady(javaMmapVals);
+        boolean persistAdb = hasPersistUsbAdb(apiVals) || hasPersistUsbAdb(nativeVals)
+                || hasPersistUsbAdb(javaMmapVals);
+
+        StringBuilder diff = new StringBuilder();
+        boolean inconsistent = false;
+
+        for (String[] def : USB_RUNTIME_PROPS) {
+            String k = def[0];
+            String apiV = apiVals.get(k);
+            String natV = nativeVals.get(k);
+            String javV = javaMmapVals.get(k);
+            if (apiV == null && natV == null && javV == null) continue;
+
+            boolean keyHit;
+            String defaultIcon;
+            if (isCurrentUsbFunctionKey(k)) {
+                keyHit = containsAdbFunctionLoose(apiV) || containsAdbFunctionLoose(natV)
+                        || containsAdbFunctionLoose(javV);
+                defaultIcon = keyHit ? "🚨" : "📄";
+            } else if ("sys.usb.ffs.ready".equals(k)) {
+                keyHit = valueHits(apiV, VAL_TRUTHY) || valueHits(natV, VAL_TRUTHY)
+                        || valueHits(javV, VAL_TRUTHY);
+                defaultIcon = keyHit ? "⚠️" : "📄";
+            } else { // persist.sys.usb.config
+                keyHit = containsAdbFunctionLoose(apiV) || containsAdbFunctionLoose(natV)
+                        || containsAdbFunctionLoose(javV);
+                defaultIcon = keyHit ? "⚠️" : "📄";
+            }
+            boolean consistent = consistentValues(apiV, natV, javV);
+            String display = "API     = " + formatValue(apiV)
+                    + "\nNative  = " + formatValue(natV)
+                    + "\nJava    = " + formatValue(javV);
+            item.addDetectionDetail(keyHit ? "USB 属性命中" : "USB 属性",
+                    k, display, DetectionLayer.NATIVE, !consistent ? "🚨" : defaultIcon);
+            if (!consistent) {
+                inconsistent = true;
+                diff.append(k).append(": API=").append(formatValue(apiV))
+                        .append(" / Native=").append(formatValue(natV))
+                        .append(" / Java=").append(formatValue(javV)).append("\n");
+            }
+        }
+        if (inconsistent) {
+            item.addDetectionDetail("⚠️ 异常情况", "USB 属性三路不一致",
+                    diff.toString().trim(), DetectionLayer.NATIVE, "🚨");
+        }
+
+        // ===== framework 反射：UsbManager.getCurrentFunctions() =====
+        UsbFrameworkScan fwScan = scanUsbFrameworkRuntime();
+        String fwIcon = fwScan.adbRuntime ? "🚨" : (fwScan.available ? "📋" : "ℹ️");
+        item.addDetectionDetail("🔧 USB framework", "UsbManager runtime", fwScan.detail,
+                DetectionLayer.JAVA, fwIcon);
+
+        // ===== sysfs / configfs / FFS 存在性扫描 =====
+        UsbRuntimeScan rtScan = scanUsbRuntimeFiles(item);
+
+        // ===== 聚合判定 =====
+        boolean anyAdb = apiAdb || nativeAdb || javaAdb;
+        // API 路被 hook 报"无 adb"，但 Native/Java mmap/framework/runtime 任一命中 → 强 hook 嫌疑
+        boolean apiSilentNativeHit = !apiAdb
+                && (nativeAdb || javaAdb || fwScan.adbRuntime || rtScan.adbRuntime);
+        boolean anyAdbRuntime = anyAdb || fwScan.adbRuntime || rtScan.adbRuntime;
+        boolean ffsEvidenceAny = ffsReady || persistAdb || rtScan.ffsEvidence;
+
+        item.setLayerResult(DetectionLayer.JAVA, apiAdb || fwScan.adbRuntime);
+        item.setLayerResult(DetectionLayer.NATIVE, nativeAdb);
+        item.setLayerResult(DetectionLayer.SYSCALL, javaAdb || rtScan.adbRuntime);
+
+        if (apiSilentNativeHit) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("API 路报无 adb，但 Native/mmap/runtime 命中 (强 hook 嫌疑)");
+            item.addDetectionDetail("⚠️ USB runtime 异常",
+                    "API 与 runtime 不一致",
+                    "API sys.usb.config/state 未含 adb，但 Native mmap / Java mmap / framework / "
+                            + "sysfs / configfs 任一命中 → API 路被 hook 高度嫌疑",
+                    DetectionLayer.SYSCALL, "🚨");
+        } else if (inconsistent) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("USB 属性 API/Native/Java 不一致 (hook 嫌疑)");
+        } else if (anyAdbRuntime) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("当前 USB runtime 包含 adb function");
+        } else if (ffsEvidenceAny) {
+            item.setStatus(DetectionStatus.WARNING);
+            item.setDetail("FunctionFS / persist 辅助证据，但当前 USB function 未确认 adb");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("当前 USB runtime 未发现 adb function");
+        }
+
+        Log.i(TAG, "usb-functions: apiAdb=" + apiAdb + " natAdb=" + nativeAdb
+                + " javAdb=" + javaAdb + " ffsReady=" + ffsReady + " persistAdb=" + persistAdb
+                + " fw=" + fwScan.adbRuntime + " rt=" + rtScan.adbRuntime
+                + " ffsEvidence=" + rtScan.ffsEvidence
+                + " readable=" + rtScan.readableCount + "/" + (rtScan.readableCount + rtScan.unreadableCount));
+
+        return item;
+    }
+
+    // ===================== USB functions helpers =====================
+
+    /** "adb" 或 "ffs.adb" 子串匹配 (大小写不敏感)。 */
+    private static boolean containsAdbFunctionLoose(String v) {
+        if (v == null) return false;
+        String low = v.toLowerCase(java.util.Locale.US);
+        return low.contains("adb") || low.contains("ffs.adb");
+    }
+
+    private static boolean hasCurrentUsbAdb(Map<String, String> m) {
+        if (m == null) return false;
+        return containsAdbFunctionLoose(m.get("sys.usb.config"))
+                || containsAdbFunctionLoose(m.get("sys.usb.state"));
+    }
+
+    private static boolean hasFfsReady(Map<String, String> m) {
+        if (m == null) return false;
+        return valueHits(m.get("sys.usb.ffs.ready"), VAL_TRUTHY);
+    }
+
+    private static boolean hasPersistUsbAdb(Map<String, String> m) {
+        if (m == null) return false;
+        return containsAdbFunctionLoose(m.get("persist.sys.usb.config"));
+    }
+
+    private static boolean isCurrentUsbFunctionKey(String k) {
+        return "sys.usb.config".equals(k) || "sys.usb.state".equals(k);
+    }
+
+    /** UsbManager.getCurrentFunctions() 返回 long bitmask → 人类可读串。 */
+    private static String decodeUsbFunctions(long bits) {
+        if (bits == 0) return "none";
+        List<String> parts = new ArrayList<>();
+        if ((USB_FUNCTION_ADB & bits) != 0) parts.add("adb");
+        if ((2  & bits) != 0) parts.add("accessory");
+        if ((4  & bits) != 0) parts.add("mtp");
+        if ((8  & bits) != 0) parts.add("midi");
+        if ((16 & bits) != 0) parts.add("ptp");
+        if ((32 & bits) != 0) parts.add("rndis");
+        if ((64 & bits) != 0) parts.add("audio_source");
+        if (parts.isEmpty()) parts.add("unknown_bits=0x" + Long.toHexString(bits));
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) s.append(",");
+            s.append(parts.get(i));
+        }
+        return s.toString();
+    }
+
+    /**
+     * 反射调 UsbManager.getCurrentFunctions() / getCurrentFunctionsApplied()。
+     * 两个方法都是 system-hidden API；untrusted_app 通常被 hidden-API 黑名单或权限拒绝。
+     * 抛异常时把异常信息也作为 detail 写入 —— 异常本身就是信息（"被拒"也是判定线索）。
+     */
+    private UsbFrameworkScan scanUsbFrameworkRuntime() {
+        UsbFrameworkScan s = new UsbFrameworkScan();
+        StringBuilder sb = new StringBuilder();
+        try {
+            Object usbService = context.getSystemService("usb");
+            if (usbService == null) {
+                s.detail = "Context.USB_SERVICE 不可用";
+                return s;
+            }
+            s.available = true;
+            try {
+                Object o = invokeNoArg(usbService, "getCurrentFunctions");
+                if (o instanceof Number) {
+                    long bits = ((Number) o).longValue();
+                    String decoded = decodeUsbFunctions(bits);
+                    s.adbRuntime = (USB_FUNCTION_ADB & bits) != 0
+                            || containsAdbFunctionLoose(decoded);
+                    sb.append("currentFunctions=").append(bits)
+                            .append(" [").append(decoded).append("]");
+                } else {
+                    sb.append("getCurrentFunctions 返回 ")
+                            .append(o == null ? "null" : o.toString());
+                }
+            } catch (Throwable t) {
+                sb.append("getCurrentFunctions 不可用: ").append(simpleError(t));
+            }
+            try {
+                Object o2 = invokeNoArg(usbService, "getCurrentFunctionsApplied");
+                if (sb.length() > 0) sb.append("\n");
+                sb.append("currentFunctionsApplied=").append(o2);
+            } catch (Throwable t) {
+                if (sb.length() > 0) sb.append("\n");
+                sb.append("getCurrentFunctionsApplied 不可用: ").append(simpleError(t));
+            }
+            s.detail = sb.length() == 0 ? "USB framework 未返回 runtime 信息" : sb.toString();
+        } catch (Throwable t) {
+            s.detail = "USB framework 检测失败: " + simpleError(t);
+        }
+        return s;
+    }
+
+    /**
+     * sysfs/configfs 三类扫描：
+     *  1. /sys/class/android_usb/android0/*  文本读，含 adb 视为命中
+     *  2. /config/usb_gadget/g1/configs/b.1/ 目录列举，子项名/symlink target 含 adb 视为命中
+     *  3. /dev/usb-ffs/adb/ep0 等 FFS 端点存在性
+     */
+    private UsbRuntimeScan scanUsbRuntimeFiles(DetectionItem item) {
+        UsbRuntimeScan s = new UsbRuntimeScan();
+
+        // === 1) sysfs 文本读 (Java + syscall 兜底) ===
+        for (String path : USB_RUNTIME_VALUE_PATHS) {
+            String content = readSmallTextLayered(path);
+            if (content != null && !content.isEmpty()) {
+                s.readableCount++;
+                boolean hit = containsAdbFunctionLoose(content);
+                if (hit) s.adbRuntime = true;
+                item.addDetectionDetail("📂 sysfs", path,
+                        trimDisplay(content),
+                        DetectionLayer.SYSCALL, hit ? "🚨" : "✅");
+            } else {
+                s.unreadableCount++;
+            }
+        }
+
+        // === 2) configfs 目录列举 ===
+        for (String dir : USB_CONFIGFS_CONFIG_DIRS) {
+            File[] entries = null;
+            try {
+                entries = new File(dir).listFiles();
+            } catch (Throwable ignored) {
+            }
+            if (entries == null) {
+                s.unreadableCount++;
+                continue;
+            }
+            s.readableCount++;
+            if (entries.length == 0) {
+                item.addDetectionDetail("📂 configfs", dir, "目录可读但配置为空",
+                        DetectionLayer.JAVA, "✅");
+                continue;
+            }
+            for (File f : entries) {
+                String canonical = safeCanonicalPath(f);
+                String detail = "entry=" + f.getName()
+                        + (canonical.isEmpty() ? "" : "\ntarget=" + canonical);
+                boolean hit = containsAdbFunctionLoose(f.getName())
+                        || containsAdbFunctionLoose(canonical);
+                if (hit) s.adbRuntime = true;
+                item.addDetectionDetail("📂 configfs", dir + "/" + f.getName(),
+                        detail, DetectionLayer.JAVA, hit ? "🚨" : "📁");
+            }
+        }
+
+        // === 3) FFS / configfs 端点存在性 (Java + syscall 兜底) ===
+        for (String path : USB_RUNTIME_EXISTENCE_PATHS) {
+            FileExistResult r = fileExistsLayered(path);
+            if (r.exists) {
+                s.ffsEvidence = true;
+                // /configs/ 路径或 /ep0 端点 → 当前激活的 ADB function，强信号
+                boolean isActiveConfig = path.contains("/configs/") || path.endsWith("/ep0");
+                if (isActiveConfig) s.adbRuntime = true;
+                item.addDetectionDetail("📍 FFS 证据", path,
+                        "存在 (" + r.source + ")",
+                        r.layer, isActiveConfig ? "🚨" : "⚠️");
+            } else {
+                s.unreadableCount++;
+            }
+        }
+
+        if (s.readableCount == 0 && s.unreadableCount > 0) {
+            item.addDetectionDetail("ℹ️ 访问限制", "USB sysfs/configfs 不可读",
+                    "普通 app 当前无法读 USB sysfs/configfs（已尝试 Java + syscall 两路）",
+                    DetectionLayer.SYSCALL, "ℹ️");
+        }
+        return s;
+    }
+
+    private static class FileExistResult {
+        final boolean exists;
+        final String source;
+        final DetectionLayer layer;
+        FileExistResult(boolean exists, String source, DetectionLayer layer) {
+            this.exists = exists; this.source = source; this.layer = layer;
+        }
+    }
+
+    /** 文件存在性双路检查：Java File.exists 先，native fileExistsSyscall 兜底。 */
+    private FileExistResult fileExistsLayered(String path) {
+        try {
+            if (new File(path).exists()) {
+                return new FileExistResult(true, "java", DetectionLayer.JAVA);
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (nativeDetector.fileExistsSyscall(path)) {
+                return new FileExistResult(true, "syscall", DetectionLayer.SYSCALL);
+            }
+        } catch (Throwable ignored) {
+        }
+        return new FileExistResult(false, "", DetectionLayer.SYSCALL);
+    }
+
+    private static String safeCanonicalPath(File f) {
+        try {
+            return f.getCanonicalPath();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private static String trimDisplay(String s) {
+        if (s == null) return "";
+        String trimmed = s.trim();
+        if (trimmed.length() > 256) return trimmed.substring(0, 253) + "...";
+        return trimmed;
+    }
+
+    private static String simpleError(Throwable t) {
+        if (t == null) return "";
+        String msg = t.getMessage();
+        return t.getClass().getSimpleName() + (msg == null ? "" : ": " + msg);
+    }
+
+    /** 反射调对象的无参方法。遍历 getDeclaredMethods 走 superclass 链以匹配 hidden API。 */
+    private static Object invokeNoArg(Object target, String methodName) throws Exception {
+        Method m = findNoArgMethod(target.getClass(), methodName);
+        if (m == null) throw new NoSuchMethodException(methodName);
+        return m.invoke(target);
+    }
+
+    private static Method findNoArgMethod(Class<?> cls, String name) {
+        for (Class<?> c = cls; c != null; c = c.getSuperclass()) {
+            try {
+                Method m = c.getDeclaredMethod(name);
+                m.setAccessible(true);
+                return m;
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        return null;
+    }
+
+    // ===================== adbd runtime helpers =====================
+
+    /**
+     * adbd 进程扫描结果（学魔改版 DebugDetector$AdbdProcessScan 内部类的结构）。
+     */
+    private static class AdbdProcessScan {
+        final List<String> matches = new ArrayList<>();
+        boolean procReadable = false;
+        int checkedPids = 0;
+    }
+
+    /**
+     * 遍历 /proc/&lt;pid&gt; 找 adbd 进程，cmdline + comm 双源判定。
+     *
+     * 关键 anti-hook 设计：读 /proc/&lt;pid&gt;/cmdline 和 comm 走
+     * {@link #readSmallTextLayered}（Java FileReader 先，syscall 兜底），
+     * 即便 libc / Java FileSystem 被 hook 也能拿到原始数据。
+     */
+    private AdbdProcessScan scanAdbdProcesses() {
+        AdbdProcessScan s = new AdbdProcessScan();
+        File procDir = new File("/proc");
+        File[] files;
+        try {
+            files = procDir.listFiles();
+        } catch (Throwable t) {
+            files = null;
+        }
+        if (files == null) {
+            s.procReadable = false;
+            return s;
+        }
+        s.procReadable = true;
+        java.util.Set<String> seen = new HashSet<>();
+        for (File f : files) {
+            String name = f.getName();
+            // 只看数字目录 (PID)
+            if (name.isEmpty() || !isAllDigits(name)) continue;
+            s.checkedPids++;
+            String cmdline = normalizeProcText(readSmallTextLayered("/proc/" + name + "/cmdline"));
+            String comm = normalizeProcText(readSmallTextLayered("/proc/" + name + "/comm"));
+            if (isAdbdProcess(cmdline, comm) && seen.add(name)) {
+                StringBuilder b = new StringBuilder("PID: ").append(name);
+                if (!comm.isEmpty())    b.append("\nCOMM: ").append(comm);
+                if (!cmdline.isEmpty()) b.append("\nCMD: ").append(cmdline);
+                s.matches.add(b.toString());
+            }
+        }
+        return s;
+    }
+
+    private static boolean isAllDigits(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
+    }
+
+    /** comm == "adbd" 或 cmdline 第一个 token 的 basename == "adbd"。 */
+    private static boolean isAdbdProcess(String cmdline, String comm) {
+        if ("adbd".equals(comm)) return true;
+        if (cmdline == null || cmdline.isEmpty()) return false;
+        String first = cmdline.split("\\s+", 2)[0];
+        int slash = first.lastIndexOf('/');
+        if (slash >= 0) first = first.substring(slash + 1);
+        return "adbd".equals(first);
+    }
+
+    /** /proc/&lt;pid&gt;/cmdline 用 '\0' 分隔参数；comm 通常带末尾换行。 */
+    private static String normalizeProcText(String s) {
+        if (s == null) return "";
+        return s.replace('\0', ' ').trim();
+    }
+
+    /**
+     * Java FileReader 先读，失败/空走 native readFileSyscall (openat+read+close raw syscall)。
+     * 这是魔改版的 anti-hook 惯用法：Java I/O 被 hook 时 syscall 还能拿到原始数据。
+     */
+    private String readSmallTextLayered(String path) {
+        String java = readSmallTextJava(path);
+        if (java != null && !java.isEmpty()) return java;
+        try {
+            String syscall = nativeDetector.readFileSyscall(path);
+            if (syscall != null && !syscall.isEmpty()) return syscall;
+        } catch (Throwable ignored) {
+        }
+        return "";
+    }
+
+    private static String readSmallTextJava(String path) {
+        FileInputStream fis = null;
+        try {
+            fis = new FileInputStream(path);
+            byte[] buf = new byte[2048];
+            StringBuilder sb = new StringBuilder();
+            int n;
+            while ((n = fis.read(buf)) > 0) {
+                sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+                if (sb.length() > 8192) break;
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return "";
+        } finally {
+            try { if (fis != null) fis.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 解析 ADB 端口属性（"-1"/"0"/空 → -1；合法 1-65535 → 原值；否则 -1）。 */
+    private static int parseAdbPort(String v) {
+        if (v == null || v.isEmpty()) return -1;
+        try {
+            int n = Integer.parseInt(v.trim());
+            if (n <= 0 || n > 65535) return -1;
+            return n;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** 从三路属性源里挑首个合法端口；优先级 API > NativeMmap > JavaMmap。 */
+    private static int bestAdbPort(Map<String, String> a, Map<String, String> b,
+                                   Map<String, String> c, String key) {
+        int va = parseAdbPort(a.get(key));
+        if (va > 0) return va;
+        int vc = parseAdbPort(c.get(key));
+        if (vc > 0) return vc;
+        int vb = parseAdbPort(b.get(key));
+        return vb;
+    }
+
     private static boolean probeLocalTcpPort(int port) {
         java.net.Socket socket = null;
         try {
@@ -517,17 +1518,12 @@ public class DebugDetector {
         DetectionItem item = new DetectionItem("ADB / 调试开关",
                 "mmap 直读 debug_prop / usb_prop 检测 USB 调试与 ADB 网络");
 
-        String[] keys = new String[ADB_DEBUG_PROPS.length];
-        for (int i = 0; i < ADB_DEBUG_PROPS.length; i++) {
-            keys[i] = ADB_DEBUG_PROPS[i][0];
-        }
+        String[] keys = propKeys(ADB_DEBUG_PROPS);
 
         // API 路径（SystemProperties.get 反射）总是可用，作为主驱动；
         // mmap 路径作为「能否旁证」用，失败时只降可信度，不再短路。
         Map<String, String> apiValues = readPropertiesViaApi(keys);
-        Log.i(TAG,apiValues.toString());
         Map<String, String> javaMmapValues = readPropertiesViaMmap(keys);
-        Log.i(TAG,javaMmapValues.toString());
         Map<String, String> nativeMmapValues = readPropertiesByContext(ADB_DEBUG_PROPS);
 
         boolean javaOk = javaMmapValues != null && !javaMmapValues.isEmpty();
@@ -608,16 +1604,38 @@ public class DebugDetector {
                     DetectionLayer.NATIVE, "🚨");
         }
 
+        // init.rc 旁路扫描：极少检测会扫 /system/etc/init/hw/*.rc，把 adb/调试
+        // 烤进固件的行就是这里现形 —— 即便活态属性看着干净，rc 写死也算 RISK。
+        List<String[]> rcHits = scanRiskyInitRcDirectives();
+        boolean rcRisky = !rcHits.isEmpty();
+        for (String[] hit : rcHits) {
+            String path = hit[0];
+            String lineno = hit[1];
+            String key = hit[2];
+            String value = hit[3];
+            String raw = hit[4];
+            item.addDetectionDetail("📜 init.rc 烤入",
+                    key + " = " + value + " @ " + path + ":" + lineno,
+                    raw,
+                    DetectionLayer.SYSCALL, "🚨");
+            summary.append(key).append("=").append(value)
+                    .append(" @ ").append(path).append(":").append(lineno).append("; ");
+        }
+        Log.i(TAG, "rc-scan: hits=" + rcHits.size());
+
         item.setLayerResult(DetectionLayer.JAVA, apiRisky);
         item.setLayerResult(DetectionLayer.NATIVE, nativeRisky);
-        item.setLayerResult(DetectionLayer.SYSCALL, javaRisky);
+        item.setLayerResult(DetectionLayer.SYSCALL, javaRisky || rcRisky);
 
-        if (apiRisky || nativeRisky || javaRisky || inconsistentCount > 0) {
+        if (apiRisky || nativeRisky || javaRisky || inconsistentCount > 0 || rcRisky) {
             item.setStatus(DetectionStatus.RISK);
             if (summary.length() == 0) {
                 summary.append("API / Native / Java 结果不一致 (疑似 hook)");
             } else if (inconsistentCount > 0) {
                 summary.append(" 检测层不一致");
+            }
+            if (rcRisky) {
+                summary.append(" (init.rc 命中 ").append(rcHits.size()).append(" 条)");
             }
             if (!mmapAvailable) {
                 summary.append(" (mmap 不可用)");
@@ -673,22 +1691,135 @@ public class DebugDetector {
 
     // ===================== Java Layer Methods =====================
 
-    private boolean checkJdwp() {
-        // Check if JDWP is active by looking at /proc/self/status
+    // ===================== JDWP helper methods =====================
+
+    /** App 自身是否被标记为可调试 (FLAG_DEBUGGABLE)。JDWP attach 的前置条件之一。 */
+    private boolean isAppDebuggable() {
         try {
-            BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"));
+            android.content.pm.ApplicationInfo ai = context.getApplicationInfo();
+            return (ai.flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Java 层枚举所有线程，按归类返回 JDWP 相关线程：
+     *  · result[0] = control 类（pre-attach capability，"ADB-JDWP Connec" / "AdbConnection*"）
+     *  · result[1] = transport 类（post-attach 真 attach 凭证："JDWP Transport*" / "JDWP Event*"
+     *                              / "JDWP Command*" / "JDWP Helper*" / "JVMTI Agent*"）
+     * 每个槽位是 "tid:name|tid:name" 形式。线程名在 Linux 上限 16 字节会截断，子串匹配。
+     */
+    private String[] scanJavaThreadsForJdwpByKind() {
+        StringBuilder ctl = new StringBuilder();
+        StringBuilder xport = new StringBuilder();
+        try {
+            ThreadGroup root = Thread.currentThread().getThreadGroup();
+            while (root.getParent() != null) root = root.getParent();
+            Thread[] all = new Thread[Math.max(root.activeCount() + 16, 64)];
+            int n = root.enumerate(all, true);
+            for (int i = 0; i < n; i++) {
+                Thread t = all[i];
+                if (t == null) continue;
+                String name = t.getName();
+                if (name == null) continue;
+                int kind = classifyJdwpThreadName(name);
+                if (kind == 0) continue;
+                StringBuilder sink = (kind == 2) ? xport : ctl;
+                if (sink.length() > 0) sink.append("|");
+                sink.append(t.getId()).append(":").append(name);
+            }
+        } catch (Throwable ignored) {
+        }
+        return new String[]{ctl.toString(), xport.toString()};
+    }
+
+    /** 返回 0=NONE, 1=CONTROL, 2=TRANSPORT。和 Native 端 classifyJdwpThread 同语义。 */
+    private static int classifyJdwpThreadName(String name) {
+        if (name.contains("JDWP Transport") || name.contains("JDWP Event")
+                || name.contains("JDWP Command") || name.contains("JDWP Helper")
+                || name.contains("JVMTI Agent")) {
+            return 2;
+        }
+        if (name.contains("ADB-JDWP") || name.contains("AdbConnection")) {
+            return 1;
+        }
+        if (name.contains("JDWP") || name.contains("Jdwp")) {
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * Java 层读 /proc/net/unix 数 @jdwp 抽象 socket 总数。/proc/net/unix 在 untrusted_app
+     * 域允许读（不像 /proc/net/tcp 在 A10+ 被锁）。每行末尾是 path 列；抽象 namespace
+     * 在 procfs 里以 '@' 开头表示。
+     *
+     * 注意：这是**全局视图**，包含 adbd 的 @jdwp-control 与所有 debuggable 进程的
+     * @jdwp-&lt;pid&gt;，不能用于判定当前进程是否被 attach —— 那应该用
+     * {@link #countJdwpUnixSocketsForSelfJava()} 过滤当前 PID。
+     */
+    private int countJdwpUnixSocketsJava() {
+        BufferedReader reader = null;
+        try {
+            reader = new BufferedReader(new FileReader("/proc/net/unix"));
+            int count = 0;
             String line;
             while ((line = reader.readLine()) != null) {
-                if (line.startsWith("TracerPid:")) {
-                    int tracerPid = Integer.parseInt(line.split("\\s+")[1]);
-                    reader.close();
-                    return tracerPid > 0;
-                }
+                if (line.contains("@jdwp")) count++;
             }
-            reader.close();
-        } catch (Exception ignored) {
+            return count;
+        } catch (Throwable t) {
+            return 0;
+        } finally {
+            try { if (reader != null) reader.close(); } catch (Throwable ignored) {}
         }
-        return false;
+    }
+
+    /** 只数 @jdwp-&lt;self_pid&gt; — 才是 "JDWP 已在我们这个进程 attach" 的可信信号。 */
+    private int countJdwpUnixSocketsForSelfJava() {
+        BufferedReader reader = null;
+        try {
+            String selfTag = "@jdwp-" + android.os.Process.myPid();
+            reader = new BufferedReader(new FileReader("/proc/net/unix"));
+            int count = 0;
+            String line;
+            while ((line = reader.readLine()) != null) {
+                int idx = line.indexOf(selfTag);
+                if (idx < 0) continue;
+                int after = idx + selfTag.length();
+                // 完整 token 校验：tag 后必须是行尾或空白，避免 pid=12 误吃 pid=123
+                if (after >= line.length()) { count++; continue; }
+                char c = line.charAt(after);
+                if (c == ' ' || c == '\t' || c == '\r') count++;
+            }
+            return count;
+        } catch (Throwable t) {
+            return 0;
+        } finally {
+            try { if (reader != null) reader.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 解析 native 返回的 "KEY=VALUE\nKEY=VALUE" 报告。 */
+    private static Map<String, String> parseKeyValueReport(String report) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (report == null || report.isEmpty()) return result;
+        for (String line : report.split("\n")) {
+            int eq = line.indexOf('=');
+            if (eq <= 0) continue;
+            result.put(line.substring(0, eq).trim(), line.substring(eq + 1));
+        }
+        return result;
+    }
+
+    private static int parseIntSafe(String v, int def) {
+        if (v == null || v.isEmpty()) return def;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (Throwable t) {
+            return def;
+        }
     }
 
     /**
@@ -801,49 +1932,65 @@ public class DebugDetector {
     /**
      * Collect USB debugging details
      */
-    private void collectUsbDebuggingDetails(DetectionItem item) {
-        // ADB 状态
-        try {
-            int adbEnabled = Settings.Global.getInt(context.getContentResolver(),
-                Settings.Global.ADB_ENABLED, 0);
-            item.addDetectionDetail("⚙️ 系统设置", "ADB_ENABLED",
-                "值: " + adbEnabled + " (1=开启, 0=关闭)",
-                DetectionLayer.JAVA, "🔧");
-        } catch (Exception ignored) {
-        }
+    private void collectUsbDebuggingDetails(DetectionItem item,
+                                            int adbEnabledSetting,
+                                            Map<String, String> apiVals,
+                                            Map<String, String> javaMmapVals,
+                                            Map<String, String> nativeMmapVals) {
+        // ADB Settings
+        String adbDisplay = adbEnabledSetting < 0
+                ? "<读取失败>"
+                : adbEnabledSetting + " (1=开, 0=关)";
+        item.addDetectionDetail("⚙️ 系统设置", "Settings.Global.ADB_ENABLED",
+                "值: " + adbDisplay, DetectionLayer.JAVA, "🔧");
 
         // 开发者选项状态
         try {
             int devEnabled = Settings.Global.getInt(context.getContentResolver(),
-                Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0);
+                    Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0);
             item.addDetectionDetail("⚙️ 系统设置", "开发者选项",
-                devEnabled == 1 ? "已开启" : "已关闭",
-                DetectionLayer.JAVA, "🛠️");
+                    devEnabled == 1 ? "已开启" : "已关闭",
+                    DetectionLayer.JAVA, "🛠️");
         } catch (Exception ignored) {
         }
 
-        // 检测 adbd 进程
+        // USB function / adbd 三源对比
+        String[] keys = {"sys.usb.config", "sys.usb.state", "init.svc.adbd", "persist.sys.usb.config"};
+        for (String key : keys) {
+            String api = apiVals.get(key);
+            String nat = nativeMmapVals.get(key);
+            String jav = javaMmapVals.get(key);
+            if (api == null && nat == null && jav == null) continue;
+            String display = "API     = " + formatValue(api)
+                    + "\nNative  = " + formatValue(nat)
+                    + "\nJava    = " + formatValue(jav);
+            boolean hit = valueHits(api, key.equals("init.svc.adbd") ? VAL_EQ_RUNNING : VAL_CONTAINS_ADB)
+                    || valueHits(nat, key.equals("init.svc.adbd") ? VAL_EQ_RUNNING : VAL_CONTAINS_ADB)
+                    || valueHits(jav, key.equals("init.svc.adbd") ? VAL_EQ_RUNNING : VAL_CONTAINS_ADB);
+            item.addDetectionDetail(hit ? "📡 USB 通道命中" : "📄 USB/ADB 属性",
+                    key, display, DetectionLayer.NATIVE, hit ? "⚠️" : "📄");
+        }
+
+        // 兜底：扫 /proc/<pid>/cmdline 找 adbd 进程（在被 hook 时可作旁证）
         try {
             java.io.File procDir = new java.io.File("/proc");
             java.io.File[] procs = procDir.listFiles();
             if (procs != null) {
                 for (java.io.File proc : procs) {
                     if (!proc.getName().matches("\\d+")) continue;
-
                     try {
                         java.io.File cmdlineFile = new java.io.File(proc, "cmdline");
-                        if (cmdlineFile.exists()) {
-                            BufferedReader reader = new BufferedReader(new FileReader(cmdlineFile));
-                            String cmdline = reader.readLine();
-                            reader.close();
-
-                            if (cmdline != null && cmdline.contains("adbd")) {
-                                item.addDetectionDetail("🔄 ADB 进程", "adbd",
+                        if (!cmdlineFile.exists()) continue;
+                        BufferedReader reader = new BufferedReader(new FileReader(cmdlineFile));
+                        String cmdline = reader.readLine();
+                        reader.close();
+                        if (cmdline != null && cmdline.contains("adbd")) {
+                            item.addDetectionDetail("🔄 ADB 进程", "adbd",
                                     "PID: " + proc.getName() + "\nCMD: " + cmdline,
                                     DetectionLayer.NATIVE, "⚙️");
-                            }
                         }
-                    } catch (Exception ignored) {}
+                    } catch (Exception ignored) {
+                    }
                 }
             }
         } catch (Exception ignored) {
@@ -924,55 +2071,180 @@ public class DebugDetector {
     }
 
     /**
-     * Collect JDWP details
+     * Collect JDWP details — 把分层证据全部塞进 DetectionItem.detail 列表里展示
      */
-    private void collectJdwpDetails(DetectionItem item) {
-        // 读取 /proc/self/status
-        try {
-            BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"));
-            String line;
-            StringBuilder statusInfo = new StringBuilder();
-            while ((line = reader.readLine()) != null) {
-                if (line.startsWith("TracerPid:") ||
-                    line.startsWith("Name:") ||
-                    line.startsWith("State:")) {
-                    statusInfo.append(line).append("\n");
-                }
-            }
-            reader.close();
+    private void collectJdwpDetails(DetectionItem item,
+                                    boolean debuggerConnected,
+                                    boolean waitingForDebugger,
+                                    boolean appDebuggable,
+                                    String javaThreadHitsCtl,
+                                    String javaThreadHitsXport,
+                                    int javaUnixSocketsTotal,
+                                    int javaUnixSocketsSelf,
+                                    boolean adbConnLoaded,
+                                    boolean jvmtiLoaded,
+                                    int nativeUnixSocketsTotal,
+                                    int nativeUnixSocketsSelf,
+                                    String nativeThreadHitsCtl,
+                                    String nativeThreadHitsXport,
+                                    String jdwpProvider,
+                                    boolean adbdSockHit, int adbdSockErrno, String adbdSockName,
+                                    boolean jdwpCtlHit,  int jdwpCtlErrno,  String jdwpCtlName) {
 
-            if (statusInfo.length() > 0) {
-                item.addDetectionDetail("📄 进程状态", "/proc/self/status",
-                    statusInfo.toString().trim(),
+        // ===== JAVA 层证据 =====
+        if (debuggerConnected || waitingForDebugger) {
+            item.addDetectionDetail("☕ Java 调试 API", "Debug.isDebuggerConnected / waitingForDebugger",
+                    "connected=" + debuggerConnected + ", waiting=" + waitingForDebugger,
+                    DetectionLayer.JAVA, "🔗");
+        }
+
+        item.addDetectionDetail("🏷️ ApplicationInfo", "FLAG_DEBUGGABLE",
+                appDebuggable ? "true (允许 JDWP attach)" : "false (不允许 JDWP attach)",
+                DetectionLayer.JAVA, appDebuggable ? "⚠️" : "✅");
+
+        // Java transport 线程（真 attach 凭证）
+        if (!javaThreadHitsXport.isEmpty()) {
+            item.addDetectionDetail("🧵 Java 线程命中", "JDWP transport / JVMTI Agent (真 attach 凭证)",
+                    javaThreadHitsXport.replace("|", "\n")
+                            + "\n注: post-attach 由 libopenjdkjvmti / JDWP agent 创建",
+                    DetectionLayer.JAVA, "🚨");
+        }
+        // Java control 线程（capability，常驻）
+        if (!javaThreadHitsCtl.isEmpty()) {
+            item.addDetectionDetail("🧵 Java 线程命中", "ADB-JDWP / AdbConnection 控制线程 (capability)",
+                    javaThreadHitsCtl.replace("|", "\n")
+                            + "\n注: 控制线程在任何 debuggable app 都常驻，非 attach 凭证",
+                    DetectionLayer.JAVA, "ℹ️");
+        }
+
+        if (javaUnixSocketsSelf > 0) {
+            item.addDetectionDetail("🔌 抽象 socket (Java)", "@jdwp-<self_pid>",
+                    "命中 " + javaUnixSocketsSelf + " 条 — 当前进程被 JDWP attach",
+                    DetectionLayer.JAVA, "🚨");
+        } else if (javaUnixSocketsTotal > 0) {
+            item.addDetectionDetail("🔌 抽象 socket (Java)", "/proc/net/unix 全局 @jdwp 计数",
+                    "总数 " + javaUnixSocketsTotal
+                            + " (含 adbd @jdwp-control + 其他进程的 @jdwp-<pid>，非本进程 attach)",
+                    DetectionLayer.JAVA, "ℹ️");
+        }
+
+        // ===== NATIVE 层证据 =====
+        if (adbConnLoaded) {
+            // ART 对任何 debuggable app 都会 dlopen，不是 attach 凭证；降级展示
+            item.addDetectionDetail("📚 Native lib", "libadbconnection.so (capability)",
+                    "已加载 — ART JDWP 通道库; 任何 debuggable app 都常驻，非 attach 凭证",
+                    DetectionLayer.NATIVE, "ℹ️");
+        }
+        if (jvmtiLoaded) {
+            item.addDetectionDetail("📚 Native lib", "libopenjdkjvmti.so / libjdwp.so",
+                    "已加载 — JDWP / JVMTI agent attach 时才会 dlopen",
+                    DetectionLayer.NATIVE, "🚨");
+        }
+        if (nativeUnixSocketsSelf > 0) {
+            item.addDetectionDetail("🔌 抽象 socket (Native)", "syscall @jdwp-<self_pid>",
+                    "命中 " + nativeUnixSocketsSelf + " 条 — 当前进程被 JDWP attach",
+                    DetectionLayer.NATIVE, "🚨");
+        } else if (nativeUnixSocketsTotal > 0) {
+            item.addDetectionDetail("🔌 抽象 socket (Native)", "syscall /proc/net/unix 全局",
+                    "总数 " + nativeUnixSocketsTotal
+                            + " (含 adbd @jdwp-control + 其他进程 @jdwp-<pid>，非本进程 attach)",
+                    DetectionLayer.NATIVE, "ℹ️");
+        }
+        // Native transport 线程（真 attach 凭证）
+        if (!nativeThreadHitsXport.isEmpty()) {
+            item.addDetectionDetail("🧵 Native 线程命中",
+                    "syscall /proc/self/task/*/comm — JDWP transport / JVMTI Agent",
+                    nativeThreadHitsXport.replace("|", "\n")
+                            + "\n注: post-attach 由 libopenjdkjvmti / JDWP agent 创建",
+                    DetectionLayer.NATIVE, "🚨");
+        }
+        // Native control 线程（capability）
+        if (!nativeThreadHitsCtl.isEmpty()) {
+            item.addDetectionDetail("🧵 Native 线程命中",
+                    "syscall /proc/self/task/*/comm — ADB-JDWP / AdbConnection (capability)",
+                    nativeThreadHitsCtl.replace("|", "\n")
+                            + "\n注: 控制线程在任何 debuggable app 都常驻，非 attach 凭证",
+                    DetectionLayer.NATIVE, "ℹ️");
+        }
+
+        // ===== SYSCALL 层证据 =====
+        if (jdwpProvider != null && !jdwpProvider.isEmpty()) {
+            String hint;
+            if ("none".equalsIgnoreCase(jdwpProvider)) {
+                hint = " (JDWP 已禁用)";
+            } else if ("adbconnection".equalsIgnoreCase(jdwpProvider)) {
+                hint = " (Android 9+ 默认，走 adbd)";
+            } else if ("internal".equalsIgnoreCase(jdwpProvider)) {
+                hint = " (旧版 ART 内置 JDWP)";
+            } else {
+                hint = "";
+            }
+            item.addDetectionDetail("⚙️ JDWP Provider", "dalvik.vm.jdwp-provider (mmap 直读)",
+                    jdwpProvider + hint,
                     DetectionLayer.SYSCALL, "📋");
-            }
-        } catch (Exception ignored) {
         }
 
-        // 检测 JDWP 端口
-        try {
-            BufferedReader reader = new BufferedReader(new FileReader("/proc/net/tcp"));
-            String line;
-            while ((line = reader.readLine()) != null) {
-                // JDWP 通常使用 8000, 8700, 5005 等端口
-                if (line.contains(":1F40") || // 8000
-                    line.contains(":21FC") || // 8700
-                    line.contains(":138D")) { // 5005
-                    item.addDetectionDetail("🌐 JDWP 端口", "TCP 监听",
-                        line.trim(),
-                        DetectionLayer.SYSCALL, "🔍");
-                }
+        // ===== 主动 connect 探测（syscall 旁路，魔改版思路） =====
+        // adbd 文件系统 socket
+        {
+            String adbdHint;
+            String icon;
+            if (adbdSockHit) {  // EACCES = adbd 活但 SELinux 不让连（user build 正常）
+                adbdHint = "SELinux 拒，adbd 仍在监听（USB 调试很可能开）";
+                icon = "⚠️";
+            } else if (adbdSockErrno == 111) {  // ECONNREFUSED
+                adbdHint = "adbd 进程不在监听（USB 调试关 / adbd 死）";
+                icon = "✅";
+            } else if (adbdSockErrno == 2) {    // ENOENT
+                adbdHint = "/dev/socket/adbd 不存在";
+                icon = "✅";
+            } else if (adbdSockErrno == 0) {
+                adbdHint = "connect 成功（异常 — 普通 untrusted_app 不应能连）";
+                icon = "🚨";
+            } else {
+                adbdHint = "errno=" + adbdSockErrno;
+                icon = "ℹ️";
             }
-            reader.close();
-        } catch (Exception ignored) {
+            item.addDetectionDetail("🔌 主动 connect", "/dev/socket/adbd (AF_UNIX/SOCK_DGRAM)",
+                    "rc errno=" + adbdSockErrno + " (" + adbdSockName + ")\n" + adbdHint,
+                    DetectionLayer.SYSCALL, icon);
+        }
+        // @jdwp-control abstract socket（魔改版核心信号）
+        {
+            String ctlHint;
+            String icon;
+            if (jdwpCtlHit) {  // connect 成功 = 系统侧 JDWP 通道就位、adbd 接受我们做对端
+                ctlHint = "adbd accept 了我们的连接 → 系统侧 JDWP 控制通道已激活\n"
+                        + "注: 仅 capability，attach 凭证看 libopenjdkjvmti.so / transport 线程";
+                icon = "⚠️";
+            } else if (jdwpCtlErrno == 111) {  // ECONNREFUSED
+                ctlHint = "socket 在但 listener 没接（JDWP provider 可能关或 adbd 拒）";
+                icon = "ℹ️";
+            } else if (jdwpCtlErrno == 2) {    // ENOENT
+                ctlHint = "abstract socket @jdwp-control 不存在（JDWP 未启用）";
+                icon = "✅";
+            } else if (jdwpCtlErrno == 13) {   // EACCES
+                ctlHint = "SELinux 拒（非 debuggable app on user build 的正常情况）";
+                icon = "✅";
+            } else {
+                ctlHint = "errno=" + jdwpCtlErrno;
+                icon = "ℹ️";
+            }
+            item.addDetectionDetail("🔌 主动 connect", "@jdwp-control (AF_UNIX/SOCK_SEQPACKET)",
+                    "rc errno=" + jdwpCtlErrno + " (" + jdwpCtlName + ")\n" + ctlHint,
+                    DetectionLayer.SYSCALL, icon);
         }
 
-        // 检测 Android Studio 调试标记
-        String debuggable = android.os.Build.TAGS;
-        if (debuggable.contains("test-keys") || debuggable.contains("debug")) {
-            item.addDetectionDetail("🏷️ Build Tags", "调试标记",
-                "Build.TAGS: " + debuggable,
-                DetectionLayer.JAVA, "🔖");
+        // 跨层 socket 数量不一致 (Java 看到 N1, Native 看到 N2) — hook 嫌疑
+        // 主要比 self-pid，全局总数也对一下作为旁证
+        if (javaUnixSocketsSelf != nativeUnixSocketsSelf
+                || javaUnixSocketsTotal != nativeUnixSocketsTotal) {
+            item.addDetectionDetail("⚠️ 异常情况",
+                    "Java vs Native @jdwp socket 数不一致",
+                    "self: Java=" + javaUnixSocketsSelf + ", Native=" + nativeUnixSocketsSelf
+                            + "\ntotal: Java=" + javaUnixSocketsTotal + ", Native=" + nativeUnixSocketsTotal
+                            + "\n（/proc/net/unix 读取可能被 hook 过滤）",
+                    DetectionLayer.NATIVE, "🚨");
         }
     }
 
@@ -1135,6 +2407,50 @@ public class DebugDetector {
             {"init.svc.adbd",          "init_service_status_prop",  "default_prop"},
     };
 
+    // ===================== USB Functions Runtime detection =====================
+
+    /** UsbManager.getCurrentFunctions() bitmask 中 ADB 的位 (AOSP frameworks/base) */
+    private static final long USB_FUNCTION_ADB = 0x1L;
+
+    /** 4 个 USB runtime 属性，三路属性源 (API / Native mmap / Java mmap) 对比 */
+    private static final String[][] USB_RUNTIME_PROPS = {
+            {"persist.sys.usb.config", "system_prop",      "usb_prop"},
+            {"sys.usb.config",         "usb_control_prop", "usb_prop"},
+            {"sys.usb.state",          "usb_control_prop", "usb_prop"},
+            {"sys.usb.ffs.ready",      "ffs_prop",         "usb_prop"},
+    };
+
+    /** sysfs 文本：读内容看是否含 "adb"。Android 11- 旧的 android_usb 路径 */
+    private static final String[] USB_RUNTIME_VALUE_PATHS = {
+            "/sys/class/android_usb/android0/functions",
+            "/sys/class/android_usb/android0/state",
+            "/sys/class/android_usb/android0/enable",
+    };
+
+    /** configfs 目录：列举当前激活的 USB function (Android 11+ ConfigFS 风格) */
+    private static final String[] USB_CONFIGFS_CONFIG_DIRS = {
+            "/config/usb_gadget/g1/configs/b.1",
+    };
+
+    /** FunctionFS / configfs 存在性检查：含 "/configs/" 或以 "/ep0" 结尾的视为活跃 ADB function */
+    private static final String[] USB_RUNTIME_EXISTENCE_PATHS = {
+            "/dev/usb-ffs/adb/ep0",
+            "/config/usb_gadget/g1/functions/ffs.adb",
+    };
+
+    private static class UsbFrameworkScan {
+        boolean available = false;
+        boolean adbRuntime = false;
+        String detail = "";
+    }
+
+    private static class UsbRuntimeScan {
+        boolean adbRuntime = false;
+        boolean ffsEvidence = false;
+        int readableCount = 0;
+        int unreadableCount = 0;
+    }
+
     private static boolean evaluateRisk(String key, String value) {
         if (value == null || value.isEmpty()) return false;
         switch (key) {
@@ -1251,8 +2567,6 @@ public class DebugDetector {
             if (buf == null) continue;
             anyOpened = true;
             collectFromBuffer(buf, keys, result);
-            Log.i(TAG,DEV_PROPERTIES_ROOT+"/"+ctxName);
-            Log.i(TAG,keys + " : " +result);
         }
 
         return anyOpened ? result : null;
@@ -1311,13 +2625,23 @@ public class DebugDetector {
      * 扫描整段 buffer 收集所有匹配。
      * 京东 c.java#a(String) 的等价实现 —— 用于反作弊检测：Bionic trie 设计下同一 key
      * 只应存在一份 prop_info，扫到多份就是双写/篡改痕迹。
+     *
+     * 边界校验（防止 needle 是更长 key 的子串导致误匹）：
+     *  · key 之前必须是 NUL（prop_info name 字段起点），否则我们扫到的是更长 key 的尾部
+     *    e.g. 扫 "sys.usb.config" 在 "persist.sys.usb.config\0" 里的偏移 8 处也能匹中，
+     *         但前一字节是 '.' 而非 '\0' → 拦掉
      */
     private static List<String> findAllValues(ByteBuffer buf, String key) {
         List<String> hits = new ArrayList<>(2);
         byte[] needle = key.getBytes(StandardCharsets.UTF_8);
         int capacity = buf.capacity();
         int limit = capacity - needle.length - 1;
-        for (int i = 0; i < limit; i++) {
+        // i 从 96 起（前面需要 prop_info 头）；同时 i-1 必须可读取
+        int start = Math.max(96, 1);
+        for (int i = start; i < limit; i++) {
+            // 1. 边界：前一字节必须是 NUL，否则是更长 key 的子串
+            if (buf.get(i - 1) != 0) continue;
+            // 2. needle 完整匹配
             boolean match = true;
             for (int j = 0; j < needle.length; j++) {
                 if (buf.get(i + j) != needle[j]) {
@@ -1326,8 +2650,9 @@ public class DebugDetector {
                 }
             }
             if (!match) continue;
+            // 3. 尾部 NUL：name 字段 null-terminated
             if (buf.get(i + needle.length) != 0) continue;
-            if (i < 96) continue;
+            // 4. prop_info serial flag 过滤（Bionic 经验值）
             if ((buf.getInt(i - 96) & 0x10000) != 0) continue;
             hits.add(readNullTerminated(buf, i - 92, 92));
         }
@@ -1348,5 +2673,180 @@ public class DebugDetector {
             }
         }
         return sb.toString();
+    }
+
+    // ===================== init.rc directive scan =====================
+
+    /**
+     * 常见 init script 目录。逐目录 listFiles 收集 *.rc；失败静默跳过。
+     * /system/etc/init/hw/ 是 Android 8.0+ 主 init.rc 与 init.usb.rc 的归属地，
+     * 也是 ROM/刷机包把 "setprop persist.sys.usb.config adb" 烤进固件最常见的位置。
+     */
+    private static final String[] INIT_RC_DIRS = {
+            "/system/etc/init/hw",
+            "/system/etc/init",
+            "/vendor/etc/init/hw",
+            "/vendor/etc/init",
+            "/odm/etc/init",
+            "/product/etc/init",
+    };
+
+    /** listFiles 失败时（readdir 被 SELinux 拒）按已知文件名兜底直 open。 */
+    private static final String[] INIT_RC_FALLBACK_FILES = {
+            "/init.rc",
+            "/system/init.rc",
+            "/system/etc/init/hw/init.rc",
+            "/system/etc/init/hw/init.usb.rc",
+            "/system/etc/init/hw/init.usb.configfs.rc",
+            "/vendor/etc/init/hw/init.usb.rc",
+            "/vendor/etc/init/hw/init.usb.configfs.rc",
+    };
+
+    /** 单条 rc hit：{path, lineno, key, value, raw line}。 */
+    private static List<String[]> scanRiskyInitRcDirectives() {
+        List<String[]> hits = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+
+        for (String dir : INIT_RC_DIRS) {
+            File d = new File(dir);
+            File[] children = null;
+            try {
+                children = d.listFiles();
+            } catch (Throwable ignored) {
+            }
+            if (children == null) continue;
+            for (File f : children) {
+                if (f == null) continue;
+                String name = f.getName();
+                if (name == null || !name.endsWith(".rc")) continue;
+                String canon;
+                try {
+                    canon = f.getCanonicalPath();
+                } catch (Throwable t) {
+                    canon = f.getPath();
+                }
+                if (!visited.add(canon)) continue;
+                scanRcFileForRiskySetprop(f, hits);
+            }
+        }
+        for (String path : INIT_RC_FALLBACK_FILES) {
+            File f = new File(path);
+            String canon;
+            try {
+                canon = f.getCanonicalPath();
+            } catch (Throwable t) {
+                canon = f.getPath();
+            }
+            if (!visited.add(canon)) continue;
+            scanRcFileForRiskySetprop(f, hits);
+        }
+        return hits;
+    }
+
+    private static void scanRcFileForRiskySetprop(File f, List<String[]> hits) {
+        BufferedReader br = null;
+        try {
+            br = new BufferedReader(new FileReader(f));
+            String line;
+            int lineno = 0;
+            // 块上下文：跟踪当前 on/service 块是否「条件触发」。AOSP 标准 init.usb.rc 把
+            // "setprop persist.sys.usb.config adb" 这类行写在
+            // `on property:ro.debuggable=1 && ...` 块里 —— 关 USB 调试时根本不执行，
+            // 直接按字面命中会大量误报。规则：
+            //  · `on` 头含 "property:" → 条件触发，跳过块内 setprop
+            //  · `service ...` 块 → 跳过（service 块里的 setprop 是启停触发型）
+            //  · 文件开头任何块之前 → 视作不确定，也跳过
+            //  · value 含 ${...} 变量展开 → 跳过（实际值依赖运行时属性）
+            boolean blockConditional = true;
+            while ((line = br.readLine()) != null) {
+                lineno++;
+                String trimmed = line.trim();
+                if (trimmed.isEmpty() || trimmed.charAt(0) == '#') continue;
+
+                boolean atColumnZero = !line.isEmpty()
+                        && line.charAt(0) != ' ' && line.charAt(0) != '\t';
+                if (atColumnZero) {
+                    if (trimmed.startsWith("on ") || trimmed.equals("on")) {
+                        // "on init" / "on boot" 无条件；"on property:..." 或带 "&& property:" 才算条件
+                        blockConditional = trimmed.contains("property:");
+                        continue;
+                    } else if (trimmed.startsWith("service ")
+                            || trimmed.startsWith("service\t")
+                            || trimmed.equals("service")) {
+                        blockConditional = true;
+                        continue;
+                    } else if (trimmed.startsWith("import ")) {
+                        continue;
+                    }
+                }
+
+                // 块内命令：要求 setprop 在行首（trim 之后），避免误吃 trigger 行
+                if (!(trimmed.startsWith("setprop ") || trimmed.startsWith("setprop\t"))) {
+                    continue;
+                }
+                if (blockConditional) continue;
+
+                String tail = trimmed.substring("setprop".length()).trim();
+                int kEnd = -1;
+                for (int i = 0; i < tail.length(); i++) {
+                    char c = tail.charAt(i);
+                    if (c == ' ' || c == '\t') {
+                        kEnd = i;
+                        break;
+                    }
+                }
+                if (kEnd <= 0) continue;
+                String key = tail.substring(0, kEnd);
+                String value = tail.substring(kEnd).trim();
+                int hash = value.indexOf('#');
+                if (hash >= 0) value = value.substring(0, hash).trim();
+                // 去掉值两侧的引号: "adb" / 'adb'
+                if (value.length() >= 2) {
+                    char a = value.charAt(0);
+                    char b = value.charAt(value.length() - 1);
+                    if ((a == '"' && b == '"') || (a == '\'' && b == '\'')) {
+                        value = value.substring(1, value.length() - 1);
+                    }
+                }
+                // 变量展开值（${persist.sys.usb.config},adb 等）不是"硬写死"
+                if (value.contains("${")) continue;
+
+                if (isRiskyRcDirective(key, value)) {
+                    hits.add(new String[]{f.getPath(), String.valueOf(lineno), key, value, trimmed});
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            try {
+                if (br != null) br.close();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /**
+     * rc 文件里的 setprop 行只要满足下列任一就视为"把 adb/调试烤进固件"：
+     *  · persist.sys.usb.config / sys.usb.config / sys.usb.state 值包含 "adb"
+     *  · ro.debuggable=1
+     *  · ro.secure=0 或 ro.adb.secure=0
+     *  · service.adb.tcp.port 非 -1/0 (默认开 wireless adb)
+     */
+    private static boolean isRiskyRcDirective(String key, String value) {
+        if (key == null || value == null) return false;
+        switch (key) {
+            case "persist.sys.usb.config":
+            case "sys.usb.config":
+            case "sys.usb.state":
+                return value.contains("adb");
+            case "ro.debuggable":
+                return "1".equals(value);
+            case "ro.secure":
+            case "ro.adb.secure":
+                return "0".equals(value);
+            case "service.adb.tcp.port":
+                return !"-1".equals(value) && !"0".equals(value);
+            default:
+                return false;
+        }
     }
 }

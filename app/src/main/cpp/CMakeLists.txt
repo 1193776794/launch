@@ -19,6 +19,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         detector/emulator_detector.cpp
         detector/debug_detector.cpp
         detector/integrity_detector.cpp
+        detector/network_detector.cpp
 )
 
 # Include directories

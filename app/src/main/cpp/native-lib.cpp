@@ -23,6 +23,7 @@
 #include "detector/emulator_detector.h"
 #include "detector/debug_detector.h"
 #include "detector/integrity_detector.h"
+#include "detector/network_detector.h"
 #include "syscall/syscall_wrapper.h"
 
 // linux_dirent64 structure for getdents64 syscall
@@ -290,6 +291,23 @@ Java_com_xff_launch_detector_NativeDetector_checkPtraceNative(JNIEnv *env, jobje
 JNIEXPORT jint JNICALL
 Java_com_xff_launch_detector_NativeDetector_getTracerPid(JNIEnv *env, jobject thiz) {
     return DebugDetector::getTracerPid();
+}
+
+// ===================== JDWP-specific Detection =====================
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getJdwpDetectionReport(JNIEnv *env, jobject thiz) {
+    std::string report = DebugDetector::getJdwpDetectionReport();
+    return env->NewStringUTF(report.c_str());
+}
+
+// ===================== Network Native Detection =====================
+// getifaddrs + netlink RTM_GETROUTE + syscall /proc/net/dev 三路融合，
+// 用于交叉验证 Java NetworkInterface 是否被 hook
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getNetworkNativeReport(JNIEnv *env, jobject thiz) {
+    std::string report = NetworkDetector::getNetworkNativeReport();
+    return env->NewStringUTF(report.c_str());
 }
 
 // ===================== File Operations via Syscall =====================

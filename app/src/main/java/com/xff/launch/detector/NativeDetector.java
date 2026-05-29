@@ -83,6 +83,23 @@ public class NativeDetector {
 
     public native int getTracerPid();
 
+    /**
+     * JDWP 多指标聚合检测（native 走 syscall_open + syscall_read，绕 libc/Java 反射 hook）。
+     * 返回多行 KEY=VALUE：
+     *   ADBCONN=0|1            libadbconnection.so 是否在 /proc/self/maps
+     *   JVMTI=0|1              libopenjdkjvmti.so / libjdwp.so 是否加载
+     *   JDWP_SOCK=N            /proc/net/unix 中 @jdwp 抽象 socket 数量
+     *   JDWP_THREADS=tid:comm|tid:comm   JDWP / ADB-JDWP / AdbConnection 线程列表，无则空串
+     */
+    public native String getJdwpDetectionReport();
+
+    /**
+     * 深层 native 网络检测报告（getifaddrs + netlink RTM_GETROUTE + syscall /proc/net/dev）。
+     * 用于 cross-check Java NetworkInterface 是否被 hook 隐藏 VPN。多行 KEY=VALUE。
+     *  字段见 cpp/detector/network_detector.h
+     */
+    public native String getNetworkNativeReport();
+
     // ===================== File Operations =====================
 
     public native boolean fileExistsNative(String path);

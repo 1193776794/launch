@@ -23,6 +23,7 @@ import com.xff.launch.adapter.DetectionGroupAdapter;
 import com.xff.launch.detector.DebugDetector;
 import com.xff.launch.detector.EmulatorDetector;
 import com.xff.launch.detector.HookDetector;
+import com.xff.launch.detector.NetworkDetector;
 import com.xff.launch.detector.ReadlinkDetector;
 import com.xff.launch.detector.RootDetector;
 import com.xff.launch.detector.SideChannelDetector;
@@ -127,13 +128,14 @@ public class EnvironmentFragment extends Fragment {
         final String strZygote = getString(R.string.category_zygote);
         final String strTamper = getString(R.string.category_tamper);
         final String strBootloader = getString(R.string.category_bootloader);
+        final String strNetwork = getString(R.string.category_network);
 
         swipeRefresh.setRefreshing(true);
 
         executor.execute(() -> {
             DetectionResult result = performDetection(ctx,
                     strRoot, strHook, strEmulator, strDebug, strSideChannel,
-                    strReadlink, strZygote, strTamper, strBootloader);
+                    strReadlink, strZygote, strTamper, strBootloader, strNetwork);
 
             if (getActivity() != null && isAdded()) {
                 getActivity().runOnUiThread(() -> {
@@ -149,7 +151,7 @@ public class EnvironmentFragment extends Fragment {
     private DetectionResult performDetection(Context ctx,
             String strRoot, String strHook, String strEmulator, String strDebug,
             String strSideChannel, String strReadlink, String strZygote,
-            String strTamper, String strBootloader) {
+            String strTamper, String strBootloader, String strNetwork) {
         DetectionResult result = new DetectionResult();
         List<DetectionGroup> groups = new ArrayList<>();
 
@@ -192,6 +194,16 @@ public class EnvironmentFragment extends Fragment {
         DebugDetector debugDetector = new DebugDetector(ctx);
         debugGroup.setItems(debugDetector.getAllDetections());
         groups.add(debugGroup);
+
+        // Network Detection Group (VPN / proxy / local proxy ports / routes)
+        DetectionGroup networkGroup = new DetectionGroup(
+                strNetwork,
+                DetectionCategory.NETWORK,
+                R.drawable.ic_network
+        );
+        NetworkDetector networkDetector = new NetworkDetector(ctx);
+        networkGroup.setItems(networkDetector.getAllDetections());
+        groups.add(networkGroup);
 
         // Runtime Integrity Detection Group
         DetectionGroup sideChannelGroup = new DetectionGroup(
