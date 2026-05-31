@@ -50,15 +50,9 @@ public class FingerprintFragment extends Fragment {
     private TextView tvDeviceFingerprint;
     private TextView tvConsistencySummary;
     private View ivStatusIcon;
-    private TextView tvHardwareHash;
-    private TextView tvSoftwareHash;
-    private TextView tvBuildFingerprint;
     private RecyclerView recyclerIdentifiers;
 
     private View btnCopyFingerprint;
-    private View btnCopyHwHash;
-    private View btnCopySwHash;
-    private View btnCopyBuildFp;
 
     private ExecutorService executor;
     private FingerprintResult currentResult;
@@ -94,24 +88,9 @@ public class FingerprintFragment extends Fragment {
         tvConsistencySummary = view.findViewById(R.id.tv_consistency_summary);
         ivStatusIcon = view.findViewById(R.id.iv_status_icon);
 
-        View layoutHwHash = view.findViewById(R.id.layout_hw_hash);
-        View layoutSwHash = view.findViewById(R.id.layout_sw_hash);
-        View layoutBuildFp = view.findViewById(R.id.layout_build_fp);
-
-        tvHardwareHash = layoutHwHash.findViewById(R.id.tv_hash_value);
-        tvSoftwareHash = layoutSwHash.findViewById(R.id.tv_hash_value);
-        tvBuildFingerprint = layoutBuildFp.findViewById(R.id.tv_hash_value);
-
-        ((TextView) layoutHwHash.findViewById(R.id.tv_hash_label)).setText(R.string.hardware_fingerprint);
-        ((TextView) layoutSwHash.findViewById(R.id.tv_hash_label)).setText(R.string.software_fingerprint);
-        ((TextView) layoutBuildFp.findViewById(R.id.tv_hash_label)).setText(R.string.build_fingerprint);
-
         recyclerIdentifiers = view.findViewById(R.id.recycler_identifiers);
 
         btnCopyFingerprint = view.findViewById(R.id.btn_copy_fingerprint);
-        btnCopyHwHash = layoutHwHash.findViewById(R.id.btn_copy);
-        btnCopySwHash = layoutSwHash.findViewById(R.id.btn_copy);
-        btnCopyBuildFp = layoutBuildFp.findViewById(R.id.btn_copy);
 
         swipeRefresh.setColorSchemeResources(R.color.primary);
         swipeRefresh.setOnRefreshListener(this::collectFingerprints);
@@ -121,9 +100,6 @@ public class FingerprintFragment extends Fragment {
 
     private void setupCopyButtons() {
         btnCopyFingerprint.setOnClickListener(v -> copyToClipboard("Device Fingerprint", tvDeviceFingerprint.getText().toString()));
-        btnCopyHwHash.setOnClickListener(v -> copyToClipboard("Hardware Hash", tvHardwareHash.getText().toString()));
-        btnCopySwHash.setOnClickListener(v -> copyToClipboard("Software Hash", tvSoftwareHash.getText().toString()));
-        btnCopyBuildFp.setOnClickListener(v -> copyToClipboard("Build Fingerprint", tvBuildFingerprint.getText().toString()));
     }
 
     public void collectFingerprints() {
@@ -199,18 +175,7 @@ public class FingerprintFragment extends Fragment {
         tvConsistencySummary.setTextColor(color);
         ivStatusIcon.setBackgroundTintList(ColorStateList.valueOf(color));
 
-        // hashes
-        tvHardwareHash.setText("SHA256: " + abbreviate(result.getHardwareHash(), 24));
-        tvSoftwareHash.setText("SHA256: " + abbreviate(result.getSoftwareHash(), 24));
-        tvBuildFingerprint.setText(Build.FINGERPRINT);
-
         recyclerIdentifiers.setAdapter(new FingerprintItemAdapter(requireContext(), result.getItems()));
-    }
-
-    private String abbreviate(String text, int maxLength) {
-        if (text == null) return "";
-        if (text.length() <= maxLength) return text;
-        return text.substring(0, maxLength) + "...";
     }
 
     private void copyToClipboard(String label, String text) {
