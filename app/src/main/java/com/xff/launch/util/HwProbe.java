@@ -19,6 +19,10 @@ import android.util.SizeF;
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -314,6 +318,141 @@ public final class HwProbe {
                     EGL14.eglTerminate(dpy);
                 }
             } catch (Throwable ignored) {}
+        }
+    }
+
+    // ==================== GPU 像素渲染指纹（WebGL canvas 的安卓移植）====================
+
+    /**
+     * 离屏渲染一个确定性场景（含 sin/pow/tan/fract 等放大 GPU 浮点精度差异的着色器），
+     * glReadPixels 读回像素做 SHA-256。熵定位「GPU 型号 + 驱动」级——同型号同 ROM 相同，
+     * 但难伪造、抗恢复出厂、可揪模拟器/云机。
+     */
+    public static String glPixelFingerprint() {
+        final int W = 256, H = 256;
+        EGLDisplay dpy = EGL14.EGL_NO_DISPLAY;
+        EGLContext context = EGL14.EGL_NO_CONTEXT;
+        EGLSurface surface = EGL14.EGL_NO_SURFACE;
+        try {
+            dpy = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
+            if (dpy == EGL14.EGL_NO_DISPLAY) return "";
+            int[] ver = new int[2];
+            if (!EGL14.eglInitialize(dpy, ver, 0, ver, 1)) return "";
+            int[] cfgAttr = {
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+                    EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_NONE
+            };
+            EGLConfig[] cfgs = new EGLConfig[1];
+            int[] num = new int[1];
+            if (!EGL14.eglChooseConfig(dpy, cfgAttr, 0, cfgs, 0, 1, num, 0) || num[0] == 0) return "";
+            int[] ctxAttr = {EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE};
+            context = EGL14.eglCreateContext(dpy, cfgs[0], EGL14.EGL_NO_CONTEXT, ctxAttr, 0);
+            int[] surfAttr = {EGL14.EGL_WIDTH, W, EGL14.EGL_HEIGHT, H, EGL14.EGL_NONE};
+            surface = EGL14.eglCreatePbufferSurface(dpy, cfgs[0], surfAttr, 0);
+            if (!EGL14.eglMakeCurrent(dpy, surface, surface, context)) return "";
+
+            final String VS =
+                    "attribute vec2 aPos;\n" +
+                    "void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+            final String FS =
+                    "precision highp float;\n" +
+                    "void main(){\n" +
+                    "  vec2 p = gl_FragCoord.xy / 256.0;\n" +
+                    "  float a = fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453);\n" +
+                    "  float b = pow(p.x, 2.2) * cos(p.y * 50.0);\n" +
+                    "  float c = tan(p.x * 3.14159 + 0.0007);\n" +
+                    "  float d = exp(p.y) * sin(p.x * 91.7);\n" +
+                    "  gl_FragColor = vec4(fract(a+d), fract(abs(b)), fract(abs(c)), 1.0);\n" +
+                    "}\n";
+
+            int prog = buildProgram(VS, FS);
+            if (prog == 0) return "";
+
+            GLES20.glDisable(GLES20.GL_DITHER);
+            GLES20.glViewport(0, 0, W, H);
+            GLES20.glClearColor(0f, 0f, 0f, 1f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            GLES20.glUseProgram(prog);
+
+            float[] quad = {-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f};
+            FloatBuffer vb = ByteBuffer.allocateDirect(quad.length * 4)
+                    .order(ByteOrder.nativeOrder()).asFloatBuffer();
+            vb.put(quad).position(0);
+            int loc = GLES20.glGetAttribLocation(prog, "aPos");
+            GLES20.glEnableVertexAttribArray(loc);
+            GLES20.glVertexAttribPointer(loc, 2, GLES20.GL_FLOAT, false, 0, vb);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+            GLES20.glFinish();
+
+            ByteBuffer pixels = ByteBuffer.allocateDirect(W * H * 4).order(ByteOrder.nativeOrder());
+            GLES20.glReadPixels(0, 0, W, H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels);
+            pixels.position(0);
+            byte[] buf = new byte[W * H * 4];
+            pixels.get(buf);
+            return sha256Hex(buf);
+        } catch (Throwable t) {
+            return "";
+        } finally {
+            try {
+                if (dpy != EGL14.EGL_NO_DISPLAY) {
+                    EGL14.eglMakeCurrent(dpy, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
+                    if (surface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(dpy, surface);
+                    if (context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(dpy, context);
+                    EGL14.eglTerminate(dpy);
+                }
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private static int buildProgram(String vs, String fs) {
+        int v = compileShader(GLES20.GL_VERTEX_SHADER, vs);
+        int f = compileShader(GLES20.GL_FRAGMENT_SHADER, fs);
+        if (v == 0 || f == 0) return 0;
+        int prog = GLES20.glCreateProgram();
+        if (prog == 0) return 0;
+        GLES20.glAttachShader(prog, v);
+        GLES20.glAttachShader(prog, f);
+        GLES20.glLinkProgram(prog);
+        int[] status = new int[1];
+        GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, status, 0);
+        GLES20.glDeleteShader(v);
+        GLES20.glDeleteShader(f);
+        if (status[0] == 0) {
+            GLES20.glDeleteProgram(prog);
+            return 0;
+        }
+        return prog;
+    }
+
+    private static int compileShader(int type, String src) {
+        int s = GLES20.glCreateShader(type);
+        if (s == 0) return 0;
+        GLES20.glShaderSource(s, src);
+        GLES20.glCompileShader(s);
+        int[] status = new int[1];
+        GLES20.glGetShaderiv(s, GLES20.GL_COMPILE_STATUS, status, 0);
+        if (status[0] == 0) {
+            GLES20.glDeleteShader(s);
+            return 0;
+        }
+        return s;
+    }
+
+    private static String sha256Hex(byte[] data) {
+        try {
+            byte[] h = MessageDigest.getInstance("SHA-256").digest(data);
+            StringBuilder sb = new StringBuilder();
+            for (byte b : h) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) sb.append('0');
+                sb.append(hex);
+            }
+            return sb.substring(0, 16); // 取前 16 hex 足够
+        } catch (Throwable t) {
+            return "";
         }
     }
 

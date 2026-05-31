@@ -245,6 +245,10 @@ public final class FingerprintDefinitions {
         specs.add(define("gpu_caps", "GPU 扩展/能力指纹", Group.HARDWARE, HashTag.HARDWARE)
                 .probe(JAVA_API, "GL_EXTENSIONS+limits+EGL", () -> HwProbe.gpuCapsFingerprint()));
 
+        // GPU 像素渲染指纹 —— WebGL canvas 安卓移植，离屏渲染+glReadPixels（GPU+驱动级·难伪造）
+        specs.add(define("gl_pixel_fp", "GPU 像素渲染指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_API, "离屏GLES+glReadPixels+SHA256", () -> HwProbe.glPixelFingerprint()));
+
         // 音频 HAL 参数
         specs.add(define("audio_fp", "音频 HAL 指纹", Group.HARDWARE, HashTag.HARDWARE)
                 .probe(JAVA_API, "OUTPUT_SAMPLE_RATE/FRAMES", () -> HwProbe.audioFingerprint(ctx)));
