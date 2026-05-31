@@ -183,11 +183,6 @@ public final class FingerprintDefinitions {
                 .probe(NATIVE_FILE, "getSELinuxFingerprint (native)", () -> nd.getSELinuxFingerprintNative())
                 .probe(SYSCALL, "getSELinuxFingerprint (syscall)", () -> nd.getSELinuxFingerprintSyscall()));
 
-        specs.add(define("proc_name", "进程包名", Group.SYSTEM, HashTag.NONE)
-                .probe(JAVA_API, "Context.getPackageName()", () -> ctx.getPackageName())
-                .probe(NATIVE_FILE, "cmdline (native)", "/proc/self/cmdline", () -> nd.getCmdlineNative())
-                .probe(SYSCALL, "cmdline (syscall)", "/proc/self/cmdline", () -> nd.getCmdlineSyscall()));
-
         // ==================== 扩展硬件指纹（传感器/GPU/相机/存储等）====================
 
         // ⭐ 存储芯片序列 eMMC/UFS CID —— 每台唯一，多路读 sysfs
@@ -227,6 +222,52 @@ public final class FingerprintDefinitions {
         // 内存布局 hash —— 注：Android 10+ 物理地址被抹零，实际熵偏低，仅机型级参考
         specs.add(define("mem_layout", "内存布局 Hash", Group.HARDWARE, HashTag.NONE)
                 .probe(JAVA_FILE, "djb2(iomem/zoneinfo)", "/proc/iomem", () -> HwProbe.fileHashAny("/proc/iomem", "/proc/zoneinfo")));
+
+        // ==================== 隐蔽采集维度（调研新增）====================
+
+        // ⭐ Vulkan 硬件指纹 —— deviceUUID 跨重启/进程/驱动版本稳定，难伪造
+        specs.add(define("vulkan_fp", "Vulkan 硬件指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(NATIVE_PROP, "vkGetPhysicalDeviceProperties2", () -> nd.getVulkanFingerprintNative()));
+
+        // 电池特征 —— 设计容量(机型级稳定) + 技术
+        specs.add(define("battery_fp", "电池特征", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_API, "PowerProfile + sysfs", () -> HwProbe.batteryFingerprint(ctx)));
+
+        // 热区列表 —— 传感器类型清单
+        specs.add(define("thermal_zones", "热区列表指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_FILE, "thermal_zone*/type", "/sys/class/thermal", () -> HwProbe.thermalZonesFingerprint()));
+
+        // CPU 拓扑 —— 大小核分簇布局
+        specs.add(define("cpu_topology", "CPU 拓扑指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_FILE, "cpu*/topology", "/sys/devices/system/cpu", () -> HwProbe.cpuTopologyFingerprint()));
+
+        // GPU 能力/扩展全集 —— 比 renderer 串熵更高
+        specs.add(define("gpu_caps", "GPU 扩展/能力指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_API, "GL_EXTENSIONS+limits+EGL", () -> HwProbe.gpuCapsFingerprint()));
+
+        // 音频 HAL 参数
+        specs.add(define("audio_fp", "音频 HAL 指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_API, "OUTPUT_SAMPLE_RATE/FRAMES", () -> HwProbe.audioFingerprint(ctx)));
+
+        // 系统属性全量 hash —— 构建级软件指纹
+        specs.add(define("prop_set_hash", "系统属性全量 Hash", Group.SYSTEM, HashTag.SOFTWARE)
+                .probe(JAVA_REFLECT, "djb2(ro.* 属性集)", () -> HwProbe.propSetHash()));
+
+        // 内核配置 hash
+        specs.add(define("kernel_config", "内核配置 Hash", Group.SYSTEM, HashTag.SOFTWARE)
+                .probe(JAVA_FILE, "gunzip(/proc/config.gz)", "/proc/config.gz", () -> HwProbe.kernelConfigHash()));
+
+        // 环境旁证（改机/代理/调试信号 · Settings.Global）
+        specs.add(define("env_adb", "ADB 开关", Group.RUNTIME, HashTag.NONE)
+                .probe(JAVA_API, "Settings.Global adb_enabled", () -> HwProbe.settingsGlobal(ctx, "adb_enabled")));
+        specs.add(define("env_dev", "开发者选项", Group.RUNTIME, HashTag.NONE)
+                .probe(JAVA_API, "development_settings_enabled", () -> HwProbe.settingsGlobal(ctx, "development_settings_enabled")));
+        specs.add(define("env_proxy", "HTTP 代理", Group.RUNTIME, HashTag.NONE)
+                .probe(JAVA_API, "Settings.Global http_proxy", () -> HwProbe.settingsGlobal(ctx, "http_proxy")));
+        specs.add(define("env_ime", "默认输入法", Group.RUNTIME, HashTag.NONE)
+                .probe(JAVA_API, "Settings.Secure default_input_method", () -> HwProbe.settingsSecure(ctx, "default_input_method")));
+        specs.add(define("env_roaming", "数据漫游", Group.RUNTIME, HashTag.NONE)
+                .probe(JAVA_API, "Settings.Global data_roaming", () -> HwProbe.settingsGlobal(ctx, "data_roaming")));
 
         return specs;
     }

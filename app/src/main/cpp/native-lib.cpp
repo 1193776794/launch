@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cctype>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <vulkan/vulkan.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -2514,6 +2516,68 @@ Java_com_xff_launch_detector_NativeDetector_checkFunctionHook(JNIEnv *env, jobje
     env->ReleaseStringUTFChars(libName, lib_str);
     env->ReleaseStringUTFChars(funcName, func_str);
     return result;
+}
+
+// ===================== Vulkan 硬件指纹 =====================
+// 通过 dlopen libvulkan.so 枚举物理设备，读取 VkPhysicalDeviceProperties 与
+// VkPhysicalDeviceIDProperties.deviceUUID。deviceUUID 规范保证跨重启/进程/驱动版本不变。
+// 输出: "vendorID|deviceID|driverVersion|deviceUUID|driverUUID"
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getVulkanFingerprintNative(JNIEnv *env, jobject thiz) {
+    (void) thiz;
+    void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return env->NewStringUTF("");
+
+    auto pfnCreate = (PFN_vkCreateInstance) dlsym(lib, "vkCreateInstance");
+    auto pfnEnum = (PFN_vkEnumeratePhysicalDevices) dlsym(lib, "vkEnumeratePhysicalDevices");
+    auto pfnProps2 = (PFN_vkGetPhysicalDeviceProperties2) dlsym(lib, "vkGetPhysicalDeviceProperties2");
+    auto pfnProps = (PFN_vkGetPhysicalDeviceProperties) dlsym(lib, "vkGetPhysicalDeviceProperties");
+    auto pfnDestroy = (PFN_vkDestroyInstance) dlsym(lib, "vkDestroyInstance");
+    if (!pfnCreate || !pfnEnum || !pfnProps) {
+        dlclose(lib);
+        return env->NewStringUTF("");
+    }
+
+    std::string result;
+    VkApplicationInfo appInfo{};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.pApplicationInfo = &appInfo;
+
+    VkInstance inst = VK_NULL_HANDLE;
+    if (pfnCreate(&ci, nullptr, &inst) == VK_SUCCESS && inst != VK_NULL_HANDLE) {
+        uint32_t count = 0;
+        pfnEnum(inst, &count, nullptr);
+        if (count > 0) {
+            std::vector<VkPhysicalDevice> devs(count);
+            pfnEnum(inst, &count, devs.data());
+            char buf[600];
+            if (pfnProps2) {
+                VkPhysicalDeviceIDProperties idp{};
+                idp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+                VkPhysicalDeviceProperties2 p2{};
+                p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+                p2.pNext = &idp;
+                pfnProps2(devs[0], &p2);
+                char devUuid[33], drvUuid[33];
+                for (int i = 0; i < VK_UUID_SIZE; i++) snprintf(devUuid + i * 2, 3, "%02x", idp.deviceUUID[i]);
+                for (int i = 0; i < VK_UUID_SIZE; i++) snprintf(drvUuid + i * 2, 3, "%02x", idp.driverUUID[i]);
+                snprintf(buf, sizeof(buf), "%u|%u|%u|%s|%s",
+                         p2.properties.vendorID, p2.properties.deviceID,
+                         p2.properties.driverVersion, devUuid, drvUuid);
+            } else {
+                VkPhysicalDeviceProperties p{};
+                pfnProps(devs[0], &p);
+                snprintf(buf, sizeof(buf), "%u|%u|%u", p.vendorID, p.deviceID, p.driverVersion);
+            }
+            result = buf;
+        }
+        if (pfnDestroy) pfnDestroy(inst, nullptr);
+    }
+    dlclose(lib);
+    return env->NewStringUTF(result.c_str());
 }
 
 // ===================== Compatibility Method =====================

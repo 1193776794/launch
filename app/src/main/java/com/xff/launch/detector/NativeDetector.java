@@ -391,6 +391,9 @@ public class NativeDetector {
     /** Get process cmdline via syscall */
     public native String getCmdlineSyscall();
 
+    /** Vulkan 硬件指纹: vendorID|deviceID|driverVersion|deviceUUID|driverUUID (deviceUUID 跨重启稳定) */
+    public native String getVulkanFingerprintNative();
+
     // ===================== Runtime Integrity Indicators =====================
 
     /** Read system property via direct mmap of build.prop files (bypasses __system_property_get) */

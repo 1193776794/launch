@@ -193,6 +193,27 @@ FingerprintResult collect(List<FingerprintSpec> specs) {
 
 新增文件：`util/HwProbe.java`（扩展采集源）。
 
+## 9.6 隐蔽采集维度（2026-05-31 增补 · 调研落地）
+
+按采集顺序深挖隐蔽源，新增 13 项；同时**删除 `persistent_token` 与 `proc_name`**（及对应的存储权限流程）。真机 MEIZU 21/A15 实测命中情况：
+
+| id | 维度 | 采集源 | A15 实测 |
+|---|---|---|---|
+| `vulkan_fp` | ⭐Vulkan 硬件指纹 | native dlopen libvulkan，VkPhysicalDeviceIDProperties.deviceUUID | ✅ 命中(每台稳定) |
+| `battery_fp` | 电池特征 | PowerProfile 反射设计容量 + sysfs 技术 | ✅ 4800mAh |
+| `thermal_zones` | 热区列表 | `/sys/class/thermal/thermal_zone*/type` | ✅ |
+| `cpu_topology` | CPU 拓扑 | `/sys/devices/system/cpu/cpu*/topology` | ✅ |
+| `gpu_caps` | GPU 扩展/能力 | EGL：GL_EXTENSIONS+limits+EGL扩展 | ✅ |
+| `audio_fp` | 音频 HAL | AudioManager 采样率/缓冲 | ✅ 48000/192 |
+| `prop_set_hash` | 系统属性全量 | 固定 ro.* 集合 djb2 | ✅ |
+| `kernel_config` | 内核配置 | gunzip(/proc/config.gz) | ✗ 内核未编 IKCONFIG |
+| `env_adb` `env_dev` `env_proxy` `env_ime` `env_roaming` | 环境旁证 | Settings.Global/Secure | ✅ 多数命中 |
+
+**新增原生方法**：`NativeDetector.getVulkanFingerprintNative()`（native-lib.cpp，dlopen 方式不硬链 libvulkan）。
+**新增采集源**：`HwProbe` 扩充电池/热区/拓扑/GPU能力/音频/Settings/属性集/内核配置。
+
+> deviceUUID 是本次"每台稳定硬件指纹"的最佳落地——规范保证跨重启/进程/驱动版本不变，且 App 无需权限即可经 Vulkan 取得。
+
 ## 10. 验收
 
 - `./gradlew :app:compileDebugJavaWithJavac` 通过。

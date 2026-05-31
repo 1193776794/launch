@@ -4,7 +4,6 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.res.ColorStateList;
-import android.os.Build;
 import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -29,7 +28,6 @@ import com.xff.launch.model.FingerprintItem;
 import com.xff.launch.model.FingerprintResult;
 import com.xff.launch.model.ProbeMethod;
 import com.xff.launch.model.ProbeStatus;
-import com.xff.launch.util.PersistentFingerprint;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -41,7 +39,7 @@ import java.util.concurrent.Executors;
 /**
  * 指纹信息页。
  *
- * <p>本类只做三件事：调引擎采集 → 处理持久化 Token → 绑定 UI。所有取证逻辑都在
+ * <p>本类只做两件事：调引擎采集 → 绑定 UI。所有取证逻辑都在
  * {@link FingerprintDefinitions} 声明，引擎在 {@link FingerprintEngine} 执行。
  */
 public class FingerprintFragment extends Fragment {
@@ -59,8 +57,6 @@ public class FingerprintFragment extends Fragment {
     private NativeDetector nativeDetector;
     private final FingerprintEngine engine = new FingerprintEngine();
 
-    private static final int PERM_REQUEST_CODE = 1001;
-
     @Nullable
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container,
@@ -75,10 +71,6 @@ public class FingerprintFragment extends Fragment {
         nativeDetector = NativeDetector.getInstance();
         initViews(view);
         setupCopyButtons();
-
-        if (!hasReadPermission()) {
-            requestStoragePermissionIfNeeded();
-        }
         collectFingerprints();
     }
 
@@ -111,7 +103,6 @@ public class FingerprintFragment extends Fragment {
         executor.execute(() -> {
             FingerprintResult result = engine.collect(
                     FingerprintDefinitions.build(requireContext().getApplicationContext(), nativeDetector));
-            appendPersistentToken(result);
 
             if (getActivity() != null && isAdded()) {
                 getActivity().runOnUiThread(() -> {
@@ -122,42 +113,6 @@ public class FingerprintFragment extends Fragment {
                 });
             }
         });
-    }
-
-    /**
-     * 跨安装持久化 Token 不是取证比对项（跨方式同值），单独处理后作为一项追加展示。
-     */
-    private void appendPersistentToken(FingerprintResult result) {
-        String token = "";
-        String status = "等待权限";
-        try {
-            Context ctx = requireContext().getApplicationContext();
-            boolean canRead = hasReadPermission();
-            String currentHwHash = result.getHardwareHash();
-
-            if (canRead && PersistentFingerprint.exists(ctx)) {
-                PersistentFingerprint.PersistentData pData = PersistentFingerprint.load(ctx, currentHwHash);
-                if (pData != null) {
-                    token = pData.token;
-                    status = pData.deviceChanged ? "设备已变更" : "设备未变更";
-                    PersistentFingerprint.save(ctx, pData.token, currentHwHash);
-                }
-            } else if (canRead) {
-                token = PersistentFingerprint.generateToken();
-                PersistentFingerprint.save(ctx, token, currentHwHash);
-                status = "新设备 (首次记录)";
-            }
-        } catch (Exception e) {
-            token = "N/A";
-            status = "无存储权限";
-        }
-
-        FingerprintItem item = new FingerprintItem("persistent_token", "持久化 Token");
-        ProbeStatus ps = (token == null || token.isEmpty() || token.equals("N/A"))
-                ? ProbeStatus.EMPTY : ProbeStatus.OK;
-        item.addProbe(new CollectProbe(ProbeMethod.JAVA_API, "LSB 隐写图片", status, token, ps));
-        item.vote();
-        result.getItems().add(item);
     }
 
     private void updateUI(FingerprintResult result) {
@@ -182,40 +137,6 @@ public class FingerprintFragment extends Fragment {
         ClipboardManager clipboard = (ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
         clipboard.setPrimaryClip(ClipData.newPlainText(label, text));
         Toast.makeText(requireContext(), R.string.copied, Toast.LENGTH_SHORT).show();
-    }
-
-    // ==================== 权限（持久化指纹恢复用）====================
-
-    private boolean hasReadPermission() {
-        if (Build.VERSION.SDK_INT >= 33) {
-            return requireContext().checkSelfPermission("android.permission.READ_MEDIA_IMAGES")
-                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return requireContext().checkSelfPermission("android.permission.READ_EXTERNAL_STORAGE")
-                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        }
-        return true;
-    }
-
-    private void requestStoragePermissionIfNeeded() {
-        String permission;
-        if (Build.VERSION.SDK_INT >= 33) {
-            permission = "android.permission.READ_MEDIA_IMAGES";
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            permission = "android.permission.READ_EXTERNAL_STORAGE";
-        } else {
-            return;
-        }
-        requestPermissions(new String[]{permission}, PERM_REQUEST_CODE);
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == PERM_REQUEST_CODE && grantResults.length > 0
-                && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            collectFingerprints();
-        }
     }
 
     @Override
