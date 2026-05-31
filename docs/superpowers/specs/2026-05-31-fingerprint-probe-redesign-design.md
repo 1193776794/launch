@@ -170,6 +170,29 @@ FingerprintResult collect(List<FingerprintSpec> specs) {
 | `res/values/strings.xml` | 加文案 |
 | `model/DetectionLayer.java` | 保留（其他检测模块仍用） |
 
+## 9.5 扩展维度（2026-05-31 增补 · 自证架构可扩展）
+
+调研后新增 11 个维度，全部只在 `FingerprintDefinitions` 加 `define()` 块 + `HwProbe` 加采集源，未改引擎/UI/模型——印证架构目标。
+
+| id | 维度 | 唯一性 | 采集源 |
+|---|---|---|---|
+| `storage_cid` | 存储芯片 CID (eMMC/UFS) | ⭐每台唯一 | sysfs 多路读（JAVA_FILE/NATIVE/SYSCALL）|
+| `sensor_list` | 传感器列表指纹 | 机型级·铁稳 | `SensorManager.getSensorList` |
+| `gyro_bias` | 陀螺仪零偏（实验） | 每台近似 | 静止采样均值·1e-3 量化（不进 hash）|
+| `gpu_render` | GPU 渲染指纹 | 机型级 | 离屏 EGL `GL_VENDOR/RENDERER/VERSION` |
+| `camera_fp` | 相机特性指纹 | 机型级 | `CameraCharacteristics` |
+| `media_codec` | 编解码器指纹 | 机型级 | `MediaCodecList` |
+| `cpuinfo_hash` | CPUInfo 全量 Hash | 机型级 | `djb2(/proc/cpuinfo)` |
+| `input_devices` | 输入设备指纹 | 机型级 | `djb2(/proc/bus/input/devices)` |
+| `device_tree` | Device-Tree 标识 | 机型级 | `/proc/device-tree/compatible` |
+| `mem_layout` | 内存布局 Hash | 机型级* | `djb2(/proc/iomem,zoneinfo)`（不进 hash）|
+
+> *内存布局：Android 10+ 物理地址被 `kptr_restrict` 抹零，实际熵偏低，仅作机型级参考。
+> "固定内存 MD5 当每台唯一指纹"在 App 沙箱不可行（ASLR + 地址抹零 + 沙箱隔离），真正"每台唯一"靠 `storage_cid` 与传感器标定。
+> 真·SensorID（标定解算）需静止多姿态采样，非同步探针能稳定产出——`gyro_bias` 为近似版，标注实验性。
+
+新增文件：`util/HwProbe.java`（扩展采集源）。
+
 ## 10. 验收
 
 - `./gradlew :app:compileDebugJavaWithJavac` 通过。

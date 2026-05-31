@@ -14,6 +14,7 @@ import android.util.DisplayMetrics;
 
 import com.xff.launch.detector.NativeDetector;
 import com.xff.launch.model.FingerprintSpec;
+import com.xff.launch.util.HwProbe;
 import com.xff.launch.util.ReflectionUtils;
 
 import java.net.NetworkInterface;
@@ -180,6 +181,50 @@ public final class FingerprintDefinitions {
                 .probe(JAVA_API, "Context.getPackageName()", () -> ctx.getPackageName())
                 .probe(NATIVE_FILE, "cmdline (native)", "/proc/self/cmdline", () -> nd.getCmdlineNative())
                 .probe(SYSCALL, "cmdline (syscall)", "/proc/self/cmdline", () -> nd.getCmdlineSyscall()));
+
+        // ==================== 扩展硬件指纹（传感器/GPU/相机/存储等）====================
+
+        // ⭐ 存储芯片序列 eMMC/UFS CID —— 每台唯一，多路读 sysfs
+        specs.add(define("storage_cid", "存储芯片 CID", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_FILE, "mmc/ufs cid 多路径", "/sys/block/mmcblk0/device/cid", () -> HwProbe.storageCid())
+                .probe(NATIVE_FILE, "cid (native)", "/sys/block/mmcblk0/device/cid", () -> firstLine(nd.readKernelFile("/sys/block/mmcblk0/device/cid")))
+                .probe(SYSCALL, "cid (syscall)", "/sys/block/mmcblk0/device/cid", () -> firstLine(nd.readFileSyscall("/sys/block/mmcblk0/device/cid"))));
+
+        // ⭐ 传感器列表指纹 —— 机型级铁稳、高熵、无权限（SensorID 的稳定替身）
+        specs.add(define("sensor_list", "传感器列表指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_API, "SensorManager.getSensorList", () -> HwProbe.sensorListFingerprint(ctx)));
+
+        // 陀螺仪零偏 —— 标定近似，实验性（静止时≈出厂零速率偏移），不进 hash 防漂移
+        specs.add(define("gyro_bias", "陀螺仪零偏 (实验)", Group.HARDWARE, HashTag.NONE)
+                .probe(JAVA_API, "陀螺采样均值·1e-3量化", () -> HwProbe.gyroBias(ctx)));
+
+        // GPU 渲染指纹 —— 离屏 EGL 取 GL 字符串
+        specs.add(define("gpu_render", "GPU 渲染指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_API, "EGL GL_VENDOR/RENDERER/VERSION", () -> HwProbe.gpuFingerprint()));
+
+        // 相机特性指纹
+        specs.add(define("camera_fp", "相机特性指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_API, "CameraCharacteristics", () -> HwProbe.cameraFingerprint(ctx)));
+
+        // 编解码器指纹
+        specs.add(define("media_codec", "编解码器指纹", Group.SYSTEM, HashTag.SOFTWARE)
+                .probe(JAVA_API, "MediaCodecList", () -> HwProbe.mediaCodecFingerprint()));
+
+        // /proc/cpuinfo 全量 hash
+        specs.add(define("cpuinfo_hash", "CPUInfo 全量 Hash", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_FILE, "djb2(/proc/cpuinfo)", "/proc/cpuinfo", () -> HwProbe.fileHash("/proc/cpuinfo")));
+
+        // 输入设备指纹
+        specs.add(define("input_devices", "输入设备指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_FILE, "djb2(input/devices)", "/proc/bus/input/devices", () -> HwProbe.fileHash("/proc/bus/input/devices")));
+
+        // Device-Tree compatible（机型/板型）
+        specs.add(define("device_tree", "Device-Tree 标识", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_FILE, "device-tree/compatible", "/proc/device-tree/compatible", () -> HwProbe.deviceTreeCompat()));
+
+        // 内存布局 hash —— 注：Android 10+ 物理地址被抹零，实际熵偏低，仅机型级参考
+        specs.add(define("mem_layout", "内存布局 Hash", Group.HARDWARE, HashTag.NONE)
+                .probe(JAVA_FILE, "djb2(iomem/zoneinfo)", "/proc/iomem", () -> HwProbe.fileHashAny("/proc/iomem", "/proc/zoneinfo")));
 
         return specs;
     }
