@@ -16,6 +16,7 @@ import com.xff.launch.detector.NativeDetector;
 import com.xff.launch.model.FingerprintSpec;
 import com.xff.launch.util.HwProbe;
 import com.xff.launch.util.ReflectionUtils;
+import com.xff.launch.util.WebProbe;
 
 import java.net.NetworkInterface;
 import java.util.ArrayList;
@@ -263,6 +264,19 @@ public final class FingerprintDefinitions {
         // 内核配置 hash
         specs.add(define("kernel_config", "内核配置 Hash", Group.SYSTEM, HashTag.SOFTWARE)
                 .probe(JAVA_FILE, "gunzip(/proc/config.gz)", "/proc/config.gz", () -> HwProbe.kernelConfigHash()));
+
+        // ==================== WebView 侧指纹（独立取证链·机型相关）====================
+
+        // WebView User-Agent —— 含机型/安卓版本/Chrome 版本/Build（含 Chrome 版本会随更新变，不进 composite）
+        specs.add(define("webview_ua", "WebView UA", Group.SYSTEM, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "WebSettings.getDefaultUserAgent", () -> WebProbe.userAgent(ctx)));
+
+        // WebView JS 指纹 —— navigator/screen/WebGL 渲染器，与 native 侧交叉验证
+        specs.add(define("webview_fp", "WebView JS 指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_API, "navigator+screen+WebGL", () -> {
+                    String j = WebProbe.jsFingerprint(ctx);
+                    return j.isEmpty() ? "" : ReflectionUtils.djb2Hash(j);
+                }));
 
         return specs;
     }
