@@ -1,145 +1,113 @@
 package com.xff.launch.model;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
- * Device fingerprint item with multi-layer values
+ * 一个指纹项的<b>结果</b>：包含通过多种采集方式得到的探针列表，以及对它们投票后的
+ * 一致性判定与命中值。
+ *
+ * <p>一致性 = 所有 {@link ProbeStatus#OK} 探针的值（规整化后）是否全等。任何一路不同
+ * 即为"不一致"，并把离群探针标红。
  */
 public class FingerprintItem {
-    private String name;
-    private String displayName;
-    private Map<DetectionLayer, String> layerValues;
-    private boolean consistent;
-    private boolean requiresPermission;
-    private boolean hasPermission;
+    private final String id;
+    private final String displayName;
+    private final List<CollectProbe> probes = new ArrayList<>();
 
-    public FingerprintItem(String name, String displayName) {
-        this.name = name;
+    private boolean consistent = true;
+    private String hitValue = "N/A";
+
+    public FingerprintItem(String id, String displayName) {
+        this.id = id;
         this.displayName = displayName;
-        this.layerValues = new HashMap<>();
-        this.consistent = true;
-        this.requiresPermission = false;
-        this.hasPermission = true;
     }
 
-    public String getName() {
-        return name;
+    public void addProbe(CollectProbe probe) {
+        probes.add(probe);
     }
 
-    public void setName(String name) {
-        this.name = name;
+    /**
+     * 对所有 OK 探针做众数投票：计算命中值、标记离群、判定一致性。
+     * 引擎在一项所有探针采集完后调用一次。
+     */
+    public void vote() {
+        Map<String, Integer> counts = new HashMap<>();
+        int validCount = 0;
+        for (CollectProbe p : probes) {
+            if (p.getStatus() != ProbeStatus.OK) continue;
+            String norm = p.getValue().trim();
+            if (norm.isEmpty()) continue;
+            validCount++;
+            counts.merge(norm, 1, Integer::sum);
+        }
+
+        if (counts.isEmpty()) {
+            hitValue = "N/A";
+            consistent = true; // 无有效值，无从判定不一致
+            return;
+        }
+
+        // 众数 = 命中值
+        String mode = null;
+        int best = -1;
+        for (Map.Entry<String, Integer> e : counts.entrySet()) {
+            if (e.getValue() > best) {
+                best = e.getValue();
+                mode = e.getKey();
+            }
+        }
+        hitValue = mode;
+        // 单一取值 → 一致；出现 ≥2 种不同取值 → 不一致
+        consistent = counts.size() <= 1 || validCount < 2;
+
+        // 标记离群（OK 且非空且 != 命中值）
+        for (CollectProbe p : probes) {
+            if (p.getStatus() != ProbeStatus.OK) continue;
+            String norm = p.getValue().trim();
+            if (norm.isEmpty()) continue;
+            p.setOutlier(!norm.equals(mode));
+        }
+    }
+
+    public String getId() {
+        return id;
     }
 
     public String getDisplayName() {
         return displayName;
     }
 
-    public void setDisplayName(String displayName) {
-        this.displayName = displayName;
-    }
-
-    public Map<DetectionLayer, String> getLayerValues() {
-        return layerValues;
-    }
-
-    public void setLayerValue(DetectionLayer layer, String value) {
-        layerValues.put(layer, value);
-        checkConsistency();
-    }
-
-    public String getLayerValue(DetectionLayer layer) {
-        return layerValues.get(layer);
-    }
-
-    /**
-     * Get the primary value to display
-     * Prefers valid values over N/A, in order: SYSCALL > NATIVE > JAVA
-     */
-    public String getPrimaryValue() {
-        // Prefer syscall value if available and not N/A
-        String syscallValue = layerValues.get(DetectionLayer.SYSCALL);
-        if (isValidValue(syscallValue)) {
-            return syscallValue;
-        }
-
-        String nativeValue = layerValues.get(DetectionLayer.NATIVE);
-        if (isValidValue(nativeValue)) {
-            return nativeValue;
-        }
-
-        String javaValue = layerValues.get(DetectionLayer.JAVA);
-        if (isValidValue(javaValue)) {
-            return javaValue;
-        }
-
-        // If all values are N/A or empty, return N/A
-        return "N/A";
-    }
-
-    /**
-     * Check if a value is valid (not null, not empty, not N/A)
-     */
-    private boolean isValidValue(String value) {
-        return value != null && !value.isEmpty() && !value.equals("N/A");
+    public List<CollectProbe> getProbes() {
+        return probes;
     }
 
     public boolean isConsistent() {
         return consistent;
     }
 
-    private void checkConsistency() {
-        if (layerValues.size() < 2) {
-            consistent = true;
-            return;
+    /** 命中值（多数票）；用于概览、hash、复制。 */
+    public String getHitValue() {
+        return hitValue;
+    }
+
+    /** 参与投票的有效探针数。 */
+    public int getOkCount() {
+        int c = 0;
+        for (CollectProbe p : probes) {
+            if (p.getStatus() == ProbeStatus.OK && !p.getValue().trim().isEmpty()) c++;
         }
+        return c;
+    }
 
-        String firstValue = null;
-        int validValueCount = 0;
-        for (String value : layerValues.values()) {
-            // Skip null, empty, and "N/A" values - don't compare them
-            if (value == null || value.isEmpty() || value.equals("N/A")) continue;
-
-            // Trim whitespace and newlines for comparison
-            String trimmedValue = value.trim();
-            if (trimmedValue.isEmpty()) continue;
-
-            validValueCount++;
-            if (firstValue == null) {
-                firstValue = trimmedValue;
-            } else if (!firstValue.equals(trimmedValue)) {
-                consistent = false;
-                return;
-            }
+    /** 离群（异常）探针数。 */
+    public int getOutlierCount() {
+        int c = 0;
+        for (CollectProbe p : probes) {
+            if (p.isOutlier()) c++;
         }
-        // If we have less than 2 valid values to compare, consider it consistent
-        // (can't determine inconsistency with only 0 or 1 valid values)
-        consistent = validValueCount < 2 || firstValue != null;
-    }
-
-    public boolean isRequiresPermission() {
-        return requiresPermission;
-    }
-
-    public void setRequiresPermission(boolean requiresPermission) {
-        this.requiresPermission = requiresPermission;
-    }
-
-    public boolean isHasPermission() {
-        return hasPermission;
-    }
-
-    public void setHasPermission(boolean hasPermission) {
-        this.hasPermission = hasPermission;
-    }
-
-    /**
-     * Get abbreviated value for display in comparison table
-     */
-    public String getAbbreviatedValue(DetectionLayer layer, int maxLength) {
-        String value = layerValues.get(layer);
-        if (value == null) return "N/A";
-        if (value.length() <= maxLength) return value;
-        return value.substring(0, maxLength - 2) + "..";
+        return c;
     }
 }

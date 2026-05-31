@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 不一致卡片：左侧色条 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/status_risk" />
+    <corners
+        android:topLeftRadius="2dp"
+        android:bottomLeftRadius="2dp" />
+</shape>

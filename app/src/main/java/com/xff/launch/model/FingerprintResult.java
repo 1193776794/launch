@@ -1,45 +1,31 @@
 package com.xff.launch.model;
 
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Overall fingerprint collection result
+ * 整体指纹采集结果。
+ *
+ * <p>已取消信任分体系——一致/不一致改由每个 {@link FingerprintItem} 自身的颜色标识，
+ * 整体只提供"一致项计数"供概览展示。
  */
 public class FingerprintResult {
-    private List<FingerprintItem> items;
+    private List<FingerprintItem> items = new ArrayList<>();
     private String compositeFingerprint;
     private String hardwareHash;
     private String softwareHash;
-    private int trustLevel;
-    private boolean tamperingDetected;
-    private long collectTime;
-
-    // Runtime integrity penalties
-    private int rwxPenalty;
-    private int urandomPenalty;
-    private int mmapPenalty;
-    private int persistentPenalty;
-
-    public FingerprintResult() {
-        this.items = new ArrayList<>();
-        this.trustLevel = 100;
-        this.tamperingDetected = false;
-        this.collectTime = System.currentTimeMillis();
-    }
+    private long collectTime = System.currentTimeMillis();
 
     public List<FingerprintItem> getItems() {
         return items;
     }
 
-    public void addItem(FingerprintItem item) {
-        items.add(item);
-    }
-
     public void setItems(List<FingerprintItem> items) {
         this.items = items;
+    }
+
+    public void addItem(FingerprintItem item) {
+        items.add(item);
     }
 
     public String getCompositeFingerprint() {
@@ -66,22 +52,6 @@ public class FingerprintResult {
         this.softwareHash = softwareHash;
     }
 
-    public int getTrustLevel() {
-        return trustLevel;
-    }
-
-    public void setTrustLevel(int trustLevel) {
-        this.trustLevel = trustLevel;
-    }
-
-    public boolean isTamperingDetected() {
-        return tamperingDetected;
-    }
-
-    public void setTamperingDetected(boolean tamperingDetected) {
-        this.tamperingDetected = tamperingDetected;
-    }
-
     public long getCollectTime() {
         return collectTime;
     }
@@ -90,63 +60,6 @@ public class FingerprintResult {
         this.collectTime = collectTime;
     }
 
-    public int getRwxPenalty() { return rwxPenalty; }
-    public void setRwxPenalty(int p) { this.rwxPenalty = p; }
-
-    public int getUrandomPenalty() { return urandomPenalty; }
-    public void setUrandomPenalty(int p) { this.urandomPenalty = p; }
-
-    public int getMmapPenalty() { return mmapPenalty; }
-    public void setMmapPenalty(int p) { this.mmapPenalty = p; }
-
-    public int getPersistentPenalty() { return persistentPenalty; }
-    public void setPersistentPenalty(int p) { this.persistentPenalty = p; }
-
-    /**
-     * Calculate trust level based on consistency + runtime integrity indicators
-     */
-    public void calculateTrustLevel() {
-        int inconsistentCount = 0;
-
-        for (FingerprintItem item : items) {
-            if (!item.isConsistent()) {
-                inconsistentCount++;
-            }
-        }
-
-        if (items.isEmpty()) {
-            trustLevel = 100;
-            tamperingDetected = false;
-            return;
-        }
-
-        // Consistency penalty: 15 per inconsistent item
-        int consistencyReduction = inconsistentCount * 15;
-        // Runtime integrity penalties
-        int runtimeReduction = rwxPenalty + urandomPenalty + mmapPenalty + persistentPenalty;
-        int totalReduction = consistencyReduction + runtimeReduction;
-
-        trustLevel = Math.max(0, 100 - totalReduction);
-        tamperingDetected = totalReduction > 0;
-    }
-
-    /**
-     * Generate composite fingerprint from all items
-     */
-    public void generateCompositeFingerprint() {
-        StringBuilder sb = new StringBuilder();
-        for (FingerprintItem item : items) {
-            String value = item.getPrimaryValue();
-            if (value != null && !value.isEmpty()) {
-                sb.append(value);
-            }
-        }
-        compositeFingerprint = sha256(sb.toString());
-    }
-
-    /**
-     * Get count of consistent items
-     */
     public int getConsistentCount() {
         int count = 0;
         for (FingerprintItem item : items) {
@@ -155,30 +68,11 @@ public class FingerprintResult {
         return count;
     }
 
-    /**
-     * Get count of inconsistent items
-     */
     public int getInconsistentCount() {
-        int count = 0;
-        for (FingerprintItem item : items) {
-            if (!item.isConsistent()) count++;
-        }
-        return count;
+        return items.size() - getConsistentCount();
     }
 
-    private String sha256(String input) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(input.getBytes());
-            StringBuilder hexString = new StringBuilder();
-            for (byte b : hash) {
-                String hex = Integer.toHexString(0xff & b);
-                if (hex.length() == 1) hexString.append('0');
-                hexString.append(hex);
-            }
-            return hexString.toString();
-        } catch (NoSuchAlgorithmException e) {
-            return "";
-        }
+    public boolean hasInconsistency() {
+        return getInconsistentCount() > 0;
     }
 }

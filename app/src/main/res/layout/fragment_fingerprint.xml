@@ -95,7 +95,7 @@
                         </LinearLayout>
                     </com.google.android.material.card.MaterialCardView>
 
-                    <!-- Trust Level -->
+                    <!-- Consistency Summary -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -103,56 +103,22 @@
                         android:gravity="center_vertical"
                         android:orientation="horizontal">
 
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="@string/trust_level"
-                            android:textAppearance="?attr/textAppearanceBodyMedium"
-                            android:textColor="?attr/colorOnSurfaceVariant" />
-
-                        <TextView
-                            android:id="@+id/tv_trust_level"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_marginStart="8dp"
-                            android:textAppearance="?attr/textAppearanceTitleLarge"
-                            android:textColor="@color/status_safe"
-                            android:textStyle="bold"
-                            tools:text="95%" />
-
-                        <View
-                            android:layout_width="0dp"
-                            android:layout_height="0dp"
-                            android:layout_weight="1" />
-
                         <View
                             android:id="@+id/iv_status_icon"
                             android:layout_width="8dp"
                             android:layout_height="8dp"
-                            android:layout_marginEnd="6dp"
+                            android:layout_marginEnd="8dp"
                             android:background="@drawable/status_dot" />
 
                         <TextView
-                            android:id="@+id/tv_tampering_status"
-                            android:layout_width="wrap_content"
+                            android:id="@+id/tv_consistency_summary"
+                            android:layout_width="0dp"
                             android:layout_height="wrap_content"
+                            android:layout_weight="1"
                             android:textAppearance="?attr/textAppearanceBodyMedium"
                             android:textColor="@color/status_safe"
-                            tools:text="@string/no_tampering" />
+                            tools:text="指纹一致性 28/30 项一致" />
                     </LinearLayout>
-
-                    <!-- Trust Progress -->
-                    <com.google.android.material.progressindicator.LinearProgressIndicator
-                        android:id="@+id/progress_trust"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:max="100"
-                        android:progress="95"
-                        app:indicatorColor="@color/status_safe"
-                        app:trackColor="?attr/colorSurfaceVariant"
-                        app:trackCornerRadius="4dp"
-                        app:trackThickness="8dp" />
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -240,37 +206,6 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp" />
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- ====== Multi-source Comparison Card ====== -->
-            <com.google.android.material.card.MaterialCardView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                app:cardBackgroundColor="?attr/colorSurfaceContainerLow"
-                app:cardCornerRadius="16dp"
-                app:cardElevation="0dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="20dp">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/multi_source_compare"
-                        android:textAppearance="?attr/textAppearanceTitleMedium"
-                        android:textColor="?attr/colorOnSurface" />
-
-                    <androidx.recyclerview.widget.RecyclerView
-                        android:id="@+id/recycler_comparison"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:nestedScrollingEnabled="false" />
-
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
