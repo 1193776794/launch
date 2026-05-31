@@ -14,7 +14,6 @@ import android.opengl.EGLContext;
 import android.opengl.EGLDisplay;
 import android.opengl.EGLSurface;
 import android.opengl.GLES20;
-import android.provider.Settings;
 import android.util.SizeF;
 
 import java.io.ByteArrayOutputStream;
@@ -328,26 +327,6 @@ public final class HwProbe {
             String fpb = am.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER);
             String s = safe(sr) + "|" + safe(fpb);
             return s.equals("|") ? "" : s;
-        } catch (Throwable t) {
-            return "";
-        }
-    }
-
-    // ==================== Settings.Global 旁证（改机/代理信号）====================
-
-    public static String settingsGlobal(Context ctx, String key) {
-        try {
-            String v = Settings.Global.getString(ctx.getContentResolver(), key);
-            return v == null ? "" : v;
-        } catch (Throwable t) {
-            return "";
-        }
-    }
-
-    public static String settingsSecure(Context ctx, String key) {
-        try {
-            String v = Settings.Secure.getString(ctx.getContentResolver(), key);
-            return v == null ? "" : v;
         } catch (Throwable t) {
             return "";
         }

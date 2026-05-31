@@ -207,7 +207,8 @@ FingerprintResult collect(List<FingerprintSpec> specs) {
 | `audio_fp` | 音频 HAL | AudioManager 采样率/缓冲 | ✅ 48000/192 |
 | `prop_set_hash` | 系统属性全量 | 固定 ro.* 集合 djb2 | ✅ |
 | `kernel_config` | 内核配置 | gunzip(/proc/config.gz) | ✗ 内核未编 IKCONFIG |
-| `env_adb` `env_dev` `env_proxy` `env_ime` `env_roaming` | 环境旁证 | Settings.Global/Secure | ✅ 多数命中 |
+
+> 环境旁证项（adb/开发者选项/代理/输入法/漫游）一度加入后按需求移除——它们是行为/环境信号而非稳定设备指纹。
 
 **新增原生方法**：`NativeDetector.getVulkanFingerprintNative()`（native-lib.cpp，dlopen 方式不硬链 libvulkan）。
 **新增采集源**：`HwProbe` 扩充电池/热区/拓扑/GPU能力/音频/Settings/属性集/内核配置。

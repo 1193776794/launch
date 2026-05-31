@@ -257,18 +257,6 @@ public final class FingerprintDefinitions {
         specs.add(define("kernel_config", "内核配置 Hash", Group.SYSTEM, HashTag.SOFTWARE)
                 .probe(JAVA_FILE, "gunzip(/proc/config.gz)", "/proc/config.gz", () -> HwProbe.kernelConfigHash()));
 
-        // 环境旁证（改机/代理/调试信号 · Settings.Global）
-        specs.add(define("env_adb", "ADB 开关", Group.RUNTIME, HashTag.NONE)
-                .probe(JAVA_API, "Settings.Global adb_enabled", () -> HwProbe.settingsGlobal(ctx, "adb_enabled")));
-        specs.add(define("env_dev", "开发者选项", Group.RUNTIME, HashTag.NONE)
-                .probe(JAVA_API, "development_settings_enabled", () -> HwProbe.settingsGlobal(ctx, "development_settings_enabled")));
-        specs.add(define("env_proxy", "HTTP 代理", Group.RUNTIME, HashTag.NONE)
-                .probe(JAVA_API, "Settings.Global http_proxy", () -> HwProbe.settingsGlobal(ctx, "http_proxy")));
-        specs.add(define("env_ime", "默认输入法", Group.RUNTIME, HashTag.NONE)
-                .probe(JAVA_API, "Settings.Secure default_input_method", () -> HwProbe.settingsSecure(ctx, "default_input_method")));
-        specs.add(define("env_roaming", "数据漫游", Group.RUNTIME, HashTag.NONE)
-                .probe(JAVA_API, "Settings.Global data_roaming", () -> HwProbe.settingsGlobal(ctx, "data_roaming")));
-
         return specs;
     }
 
