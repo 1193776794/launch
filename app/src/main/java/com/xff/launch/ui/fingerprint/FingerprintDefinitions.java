@@ -274,9 +274,18 @@ public final class FingerprintDefinitions {
         // WebView JS 指纹 —— navigator/screen/WebGL 渲染器，与 native 侧交叉验证
         specs.add(define("webview_fp", "WebView JS 指纹", Group.HARDWARE, HashTag.HARDWARE)
                 .probe(JAVA_API, "navigator+screen+WebGL", () -> {
-                    String j = WebProbe.jsFingerprint(ctx);
+                    String j = WebProbe.bundle(ctx);
                     return j.isEmpty() ? "" : ReflectionUtils.djb2Hash(j);
                 }));
+
+        // GPU 渲染器一致性 —— native EGL vs WebView WebGL，归一化后比对；不一致即 GPU 信息被篡改
+        // 复用多路投票：两路相同→一致，不同→红色不一致，一方空→忽略不误报。不进 composite。
+        specs.add(define("gpu_renderer_xcheck", "GPU 渲染器一致性", Group.HARDWARE, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "native EGL GL_RENDERER", () -> {
+                    String[] p = HwProbe.gpuFingerprint().split("\\|");
+                    return p.length > 1 ? HwProbe.normalizeGpuRenderer(p[1]) : "";
+                })
+                .probe(JAVA_API, "WebView WebGL renderer", () -> HwProbe.normalizeGpuRenderer(WebProbe.webglRenderer(ctx))));
 
         return specs;
     }

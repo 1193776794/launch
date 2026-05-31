@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.zip.GZIPInputStream;
 
 /**
@@ -509,6 +510,34 @@ public final class HwProbe {
         } finally {
             try { if (in != null) in.close(); } catch (Throwable ignored) {}
         }
+    }
+
+    // ==================== GPU 渲染器归一化（跨源比对用）====================
+
+    private static final java.util.regex.Pattern[] GPU_PATTERNS = {
+            java.util.regex.Pattern.compile("adreno\\D*(\\d+)"),
+            java.util.regex.Pattern.compile("immortalis[- ]?([a-z]?\\d+)"),
+            java.util.regex.Pattern.compile("mali[- ]?([a-z]?\\d+)"),
+            java.util.regex.Pattern.compile("xclipse\\D*(\\d+)"),
+            java.util.regex.Pattern.compile("powervr\\s*([a-z0-9]+)"),
+            java.util.regex.Pattern.compile("apple\\s*([a-z0-9]+)")
+    };
+    private static final String[] GPU_FAMILIES = {"adreno", "immortalis", "mali", "xclipse", "powervr", "apple"};
+
+    /**
+     * 把各路 GPU 渲染器字符串归一化为「家族+型号」token（如 "adreno 750"），便于跨源比对。
+     * 自动剥离 ANGLE 包装、"(TM)"、驱动版本。无法识别返回空串（→ 比对时按"无法判定"处理，不误报）。
+     */
+    public static String normalizeGpuRenderer(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        String s = raw.toLowerCase(Locale.ROOT);
+        for (int i = 0; i < GPU_PATTERNS.length; i++) {
+            java.util.regex.Matcher m = GPU_PATTERNS[i].matcher(s);
+            if (m.find()) {
+                return GPU_FAMILIES[i] + " " + m.group(1);
+            }
+        }
+        return "";
     }
 
     // ==================== 工具 ====================

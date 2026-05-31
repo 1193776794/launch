@@ -36,11 +36,27 @@ public final class WebProbe {
         return out[0] == null ? "" : out[0];
     }
 
-    /**
-     * 通过离屏 WebView 执行 JS，采集 navigator / screen / WebGL 等机型相关特征，返回 JSON。
-     * 失败返回空串。
-     */
-    public static String jsFingerprint(Context ctx) {
+    // 一次采集运行内复用同一份 WebView 结果（多个指纹项共享，避免重复开 WebView）
+    private static volatile String sBundle = null;
+    private static volatile long sBundleTime = 0L;
+
+    /** navigator / screen / WebGL 特征 JSON，带短 TTL 缓存。失败返回空串。 */
+    public static String bundle(Context ctx) {
+        long now = System.currentTimeMillis();
+        String cached = sBundle;
+        if (cached != null && now - sBundleTime < 3000) return cached;
+        String r = loadBundle(ctx);
+        sBundle = r;
+        sBundleTime = now;
+        return r;
+    }
+
+    /** WebGL UNMASKED_RENDERER（机型相关 GPU 型号），从 bundle 提取。 */
+    public static String webglRenderer(Context ctx) {
+        return extract(bundle(ctx), "glr");
+    }
+
+    private static String loadBundle(Context ctx) {
         final String[] out = {""};
         final WebView[] holder = {null};
         final CountDownLatch latch = new CountDownLatch(1);
@@ -60,7 +76,6 @@ public final class WebProbe {
         });
 
         await(latch, 3000);
-        // 主线程销毁 WebView，避免泄漏
         main.post(() -> {
             try {
                 if (holder[0] != null) holder[0].destroy();
@@ -69,6 +84,17 @@ public final class WebProbe {
 
         String r = out[0];
         return (r == null || r.startsWith("ERR:")) ? "" : r;
+    }
+
+    /** 从我们自己生成的扁平 JSON 里提取 "key":"value" 的 value（值内无引号）。 */
+    private static String extract(String json, String key) {
+        if (json == null || json.isEmpty()) return "";
+        String pat = "\"" + key + "\":\"";
+        int i = json.indexOf(pat);
+        if (i < 0) return "";
+        int start = i + pat.length();
+        int end = json.indexOf('"', start);
+        return end < 0 ? "" : json.substring(start, end);
     }
 
     private static void await(CountDownLatch latch, long ms) {
