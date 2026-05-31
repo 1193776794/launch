@@ -44,6 +44,8 @@ public class FingerprintSpec {
     private final Group group;
     private final HashTag hashTag;
     private final List<ProbeDef> probeDefs = new ArrayList<>();
+    /** composite 设备指纹中的权重：0=不纳入（剔除易变项），≥1=纳入并重复计权。 */
+    private int weight = 1;
 
     private FingerprintSpec(String id, String displayName, Group group, HashTag hashTag) {
         this.id = id;
@@ -66,6 +68,16 @@ public class FingerprintSpec {
     public FingerprintSpec probe(ProbeMethod method, String api, String source, Collector collector) {
         probeDefs.add(new ProbeDef(method, api, source, collector));
         return this;
+    }
+
+    /** 设置 composite 权重：0 剔除（用于 boot_id 等每次开机变的项），≥1 纳入并计权。 */
+    public FingerprintSpec weight(int w) {
+        this.weight = Math.max(0, w);
+        return this;
+    }
+
+    public int getWeight() {
+        return weight;
     }
 
     public String getId() {

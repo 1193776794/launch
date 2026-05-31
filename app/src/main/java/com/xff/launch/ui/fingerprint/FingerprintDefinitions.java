@@ -72,7 +72,8 @@ public final class FingerprintDefinitions {
 
         // ==================== 内核标识 ====================
 
-        specs.add(fileItem("boot_id", "Boot ID", HashTag.SOFTWARE, "/proc/sys/kernel/random/boot_id", nd));
+        // boot_id 每次开机都变，weight(0) 不纳入 composite，避免设备指纹随重启漂移
+        specs.add(fileItem("boot_id", "Boot ID", HashTag.SOFTWARE, "/proc/sys/kernel/random/boot_id", nd).weight(0));
         // kernel_version：osrelease 文件高版本可能被封，Java API os.version 兜底
         specs.add(fileItem("kernel_version", "内核版本", HashTag.NONE, "/proc/sys/kernel/osrelease", nd)
                 .probe(JAVA_API, "System.getProperty(os.version)", () -> System.getProperty("os.version")));
@@ -246,7 +247,9 @@ public final class FingerprintDefinitions {
                 .probe(JAVA_API, "GL_EXTENSIONS+limits+EGL", () -> HwProbe.gpuCapsFingerprint()));
 
         // GPU 像素渲染指纹 —— WebGL canvas 安卓移植，离屏渲染+glReadPixels（GPU+驱动级·难伪造）
+        // weight(3): 稳定且难伪造，在 composite 中加权强调
         specs.add(define("gl_pixel_fp", "GPU 像素渲染指纹", Group.HARDWARE, HashTag.HARDWARE)
+                .weight(3)
                 .probe(JAVA_API, "离屏GLES+glReadPixels+SHA256", () -> HwProbe.glPixelFingerprint()));
 
         // 音频 HAL 参数

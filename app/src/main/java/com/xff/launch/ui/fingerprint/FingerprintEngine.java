@@ -64,7 +64,8 @@ public class FingerprintEngine {
                     item.getOkCount(), item.getOutlierCount()));
 
             if (isValid(hit)) {
-                composite.append(hit);
+                // composite 按权重重复计入；weight=0 的项（如 boot_id 每次开机变）不纳入
+                for (int i = 0; i < spec.getWeight(); i++) composite.append(hit).append('|');
                 switch (spec.getHashTag()) {
                     case HARDWARE: hw.append(hit); break;
                     case SOFTWARE: sw.append(hit); break;
@@ -80,6 +81,7 @@ public class FingerprintEngine {
         result.setCompositeFingerprint(sha256(composite.toString()));
         result.setHardwareHash(sha256(hw.toString()));
         result.setSoftwareHash(sha256(sw.toString()));
+        Log.i(TAG, "COMPOSITE=" + result.getCompositeFingerprint());
         return result;
     }
 
