@@ -73,8 +73,11 @@ public final class FingerprintDefinitions {
         // ==================== 内核标识 ====================
 
         specs.add(fileItem("boot_id", "Boot ID", HashTag.SOFTWARE, "/proc/sys/kernel/random/boot_id", nd));
-        specs.add(fileItem("kernel_version", "内核版本", HashTag.NONE, "/proc/sys/kernel/osrelease", nd));
-        specs.add(fileItem("hostname", "主机名", HashTag.NONE, "/proc/sys/kernel/hostname", nd));
+        // kernel_version：osrelease 文件高版本可能被封，Java API os.version 兜底
+        specs.add(fileItem("kernel_version", "内核版本", HashTag.NONE, "/proc/sys/kernel/osrelease", nd)
+                .probe(JAVA_API, "System.getProperty(os.version)", () -> System.getProperty("os.version")));
+        specs.add(fileItem("hostname", "主机名", HashTag.NONE, "/proc/sys/kernel/hostname", nd)
+                .probe(JAVA_REFLECT, "SystemProperties net.hostname", () -> ReflectionUtils.getSystemProperty("net.hostname")));
 
         // ==================== 硬件标识 ====================
 
@@ -83,19 +86,22 @@ public final class FingerprintDefinitions {
                 .probe(NATIVE_FILE, "getCpuSerial (native)", () -> nd.getCpuSerial())
                 .probe(SYSCALL, "getCpuSerial (syscall)", () -> nd.getCpuSerialSyscall()));
 
+        // cpu_hardware：新内核 /proc/cpuinfo 删了 Hardware 行，ro.hardware 属性兜底
         specs.add(define("cpu_hardware", "CPU 硬件", Group.HARDWARE, HashTag.HARDWARE)
                 .probe(JAVA_REFLECT, "/proc/cpuinfo Hardware", () -> ReflectionUtils.getCpuHardware())
                 .probe(NATIVE_FILE, "getCpuHardware (native)", () -> nd.getCpuHardware())
-                .probe(SYSCALL, "getCpuHardware (syscall)", () -> nd.getCpuHardwareSyscall()));
+                .probe(SYSCALL, "getCpuHardware (syscall)", () -> nd.getCpuHardwareSyscall())
+                .probe(JAVA_API, "Build.HARDWARE", () -> Build.HARDWARE)
+                .probe(NATIVE_PROP, "__system_property_get(ro.hardware)", () -> nd.getBuildPropertyNative("ro.hardware")));
 
         specs.add(fileItem("soc_serial", "SoC 序列号", HashTag.HARDWARE, "/sys/devices/soc0/serial_number", nd));
         specs.add(fileItem("soc_id", "SoC ID", HashTag.HARDWARE, "/sys/devices/soc0/soc_id", nd));
 
         // ==================== Boot 参数 ====================
 
-        specs.add(bootParamItem("boot_serial", "Boot 序列号", HashTag.HARDWARE, "androidboot.serialno", nd));
-        specs.add(bootParamItem("boot_hardware", "Boot 硬件", HashTag.NONE, "androidboot.hardware", nd));
-        specs.add(bootParamItem("boot_device", "Boot Device", HashTag.NONE, "androidboot.bootdevice", nd));
+        specs.add(bootParamItem("boot_serial", "Boot 序列号", HashTag.HARDWARE, "androidboot.serialno", "ro.boot.serialno", nd));
+        specs.add(bootParamItem("boot_hardware", "Boot 硬件", HashTag.NONE, "androidboot.hardware", "ro.boot.hardware", nd));
+        specs.add(bootParamItem("boot_device", "Boot Device", HashTag.NONE, "androidboot.bootdevice", "ro.boot.bootdevice", nd));
 
         // ==================== 其它系统 ID ====================
 
@@ -194,10 +200,6 @@ public final class FingerprintDefinitions {
         specs.add(define("sensor_list", "传感器列表指纹", Group.HARDWARE, HashTag.HARDWARE)
                 .probe(JAVA_API, "SensorManager.getSensorList", () -> HwProbe.sensorListFingerprint(ctx)));
 
-        // 陀螺仪零偏 —— 标定近似，实验性（静止时≈出厂零速率偏移），不进 hash 防漂移
-        specs.add(define("gyro_bias", "陀螺仪零偏 (实验)", Group.HARDWARE, HashTag.NONE)
-                .probe(JAVA_API, "陀螺采样均值·1e-3量化", () -> HwProbe.gyroBias(ctx)));
-
         // GPU 渲染指纹 —— 离屏 EGL 取 GL 字符串
         specs.add(define("gpu_render", "GPU 渲染指纹", Group.HARDWARE, HashTag.HARDWARE)
                 .probe(JAVA_API, "EGL GL_VENDOR/RENDERER/VERSION", () -> HwProbe.gpuFingerprint()));
@@ -268,12 +270,20 @@ public final class FingerprintDefinitions {
                 .probe(SYSCALL, "openat/read (syscall)", path, () -> firstLine(nd.readFileSyscall(path)));
     }
 
-    /** Boot 参数型指纹模板：解析 /proc/cmdline 的 androidboot.X。 */
-    private static FingerprintSpec bootParamItem(String id, String name, HashTag hash, String param, NativeDetector nd) {
-        return define(id, name, Group.BOOT, hash)
+    /**
+     * Boot 参数型指纹模板：解析 /proc/cmdline 的 androidboot.X。
+     * 高版本 /proc/cmdline 对 App 被 SELinux 封禁，用对应 ro.boot.X 属性兜底。
+     */
+    private static FingerprintSpec bootParamItem(String id, String name, HashTag hash, String param, String prop, NativeDetector nd) {
+        FingerprintSpec spec = define(id, name, Group.BOOT, hash)
                 .probe(JAVA_FILE, "cmdline 解析 " + param, "/proc/cmdline", () -> ReflectionUtils.getBootParam(param))
                 .probe(NATIVE_FILE, "getBootParam (native)", () -> nd.getBootParam(param))
                 .probe(SYSCALL, "getBootParam (syscall)", () -> nd.getBootParamSyscall(param));
+        if (prop != null) {
+            spec.probe(JAVA_REFLECT, "SystemProperties " + prop, () -> ReflectionUtils.getSystemProperty(prop))
+                .probe(NATIVE_PROP, "__system_property_get(" + prop + ")", () -> nd.getBuildPropertyNative(prop));
+        }
+        return spec;
     }
 
     // ==================== Java 侧采集 helper ====================

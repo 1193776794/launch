@@ -2,8 +2,6 @@ package com.xff.launch.util;
 
 import android.content.Context;
 import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraManager;
@@ -15,16 +13,12 @@ import android.opengl.EGLContext;
 import android.opengl.EGLDisplay;
 import android.opengl.EGLSurface;
 import android.opengl.GLES20;
-import android.os.Handler;
-import android.os.HandlerThread;
 import android.util.SizeF;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 扩展硬件指纹采集源——传感器/GPU/相机/编解码器等需要 SDK API 的维度。
@@ -64,66 +58,6 @@ public final class HwProbe {
         } catch (Throwable t) {
             return "";
         }
-    }
-
-    // ==================== 陀螺仪零偏（标定近似·实验性）====================
-
-    /**
-     * 静止时陀螺仪读数 ≈ 出厂零速率偏移。采样 ~800ms 取均值并粗量化（1e-3 rad/s）。
-     * 注意：这是 SensorID 的近似——设备运动时会漂；粗量化降低噪声但仍非论文级稳定。
-     */
-    public static String gyroBias(Context ctx) {
-        return sensorBias(ctx, Sensor.TYPE_GYROSCOPE, 1000.0); // 量化到 0.001
-    }
-
-    private static String sensorBias(Context ctx, int type, double quantize) {
-        HandlerThread thread = null;
-        try {
-            final SensorManager sm = (SensorManager) ctx.getSystemService(Context.SENSOR_SERVICE);
-            if (sm == null) return "";
-            final Sensor sensor = sm.getDefaultSensor(type);
-            if (sensor == null) return "";
-
-            thread = new HandlerThread("hwprobe-sensor");
-            thread.start();
-            Handler handler = new Handler(thread.getLooper());
-
-            final double[] sum = new double[3];
-            final int[] count = {0};
-            final CountDownLatch latch = new CountDownLatch(1);
-            final int target = 60;
-
-            SensorEventListener listener = new SensorEventListener() {
-                @Override
-                public void onSensorChanged(SensorEvent event) {
-                    if (count[0] < target) {
-                        sum[0] += event.values[0];
-                        sum[1] += event.values[1];
-                        sum[2] += event.values[2];
-                        count[0]++;
-                        if (count[0] >= target) latch.countDown();
-                    }
-                }
-
-                @Override
-                public void onAccuracyChanged(Sensor s, int a) {}
-            };
-
-            sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_FASTEST, handler);
-            latch.await(1200, TimeUnit.MILLISECONDS);
-            sm.unregisterListener(listener);
-
-            if (count[0] == 0) return "";
-            return q(sum[0] / count[0], quantize) + "," + q(sum[1] / count[0], quantize) + "," + q(sum[2] / count[0], quantize);
-        } catch (Throwable t) {
-            return "";
-        } finally {
-            if (thread != null) thread.quitSafely();
-        }
-    }
-
-    private static String q(double v, double scale) {
-        return String.valueOf(Math.round(v * scale) / scale);
     }
 
     // ==================== GPU 渲染指纹（离屏 EGL）====================
@@ -233,12 +167,17 @@ public final class HwProbe {
         return "";
     }
 
-    /** eMMC/UFS CID（存储芯片序列）多路径首个命中。 */
+    /** eMMC CID / UFS 序列（存储芯片序列）多路径首个命中。UFS 设备无 mmcblk，走 sda。 */
     public static String storageCid() {
         String[] paths = {
+                // eMMC
                 "/sys/block/mmcblk0/device/cid",
                 "/sys/class/mmc_host/mmc0/mmc0:0001/cid",
-                "/sys/class/mmc_host/mmc0/mmc0:0001/serial"
+                "/sys/class/mmc_host/mmc0/mmc0:0001/serial",
+                // UFS（MEIZU 21 等旗舰）
+                "/sys/block/sda/device/serial",
+                "/sys/block/sda/device/unique_id",
+                "/sys/devices/platform/soc/1d84000.ufshc/string_descriptors/serial_number"
         };
         for (String p : paths) {
             String v = ReflectionUtils.readFileFirstLine(p);
