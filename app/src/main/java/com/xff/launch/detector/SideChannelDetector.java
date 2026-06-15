@@ -5,8 +5,10 @@ import android.content.Context;
 import com.xff.launch.model.DetectionItem;
 import com.xff.launch.model.DetectionLayer;
 import com.xff.launch.model.DetectionStatus;
+import com.xff.launch.util.ReflectionUtils;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileReader;
 import java.util.ArrayList;
 import java.util.List;
@@ -43,6 +45,9 @@ public class SideChannelDetector {
         // 1. SELinux 安全状态
         items.add(checkSELinux());
 
+        // 1b. SELinux 文件标签 (lgetxattr — Magisk 改文件 context 异常)
+        items.add(checkSELinuxFileLabels());
+
         // 2. 系统库代码完整性 (核心检测 - 对齐 sgmain Stage 13)
         items.add(checkSystemLibIntegrity());
 
@@ -64,68 +69,150 @@ public class SideChannelDetector {
     // ===================== 1. SELinux 检测 =====================
 
     private DetectionItem checkSELinux() {
-        DetectionItem item = new DetectionItem("SELinux 状态", "检测 SELinux 安全模式");
+        DetectionItem item = new DetectionItem("SELinux 状态", "强制模式 + 进程上下文 + 反伪造交叉");
 
-        String enforce = nativeDetector.readFileSyscall("/sys/fs/selinux/enforce");
-        String getenforce = nativeDetector.getBuildPropertyNative("ro.boot.selinux");
+        // --- 1) 进程上下文（先取，用于状态推断 + 异常判定）---
+        String ctx = trimOrEmpty(nativeDetector.getSELinuxContextNative());
+        if (ctx.isEmpty()) ctx = trimOrEmpty(nativeDetector.readFileSyscall("/proc/self/attr/current"));
+        String domain = seDomain(ctx);
+        boolean hasCtx = !domain.isEmpty();
+        boolean rootCtx = !ctx.isEmpty() && (domain.equals("su") || domain.contains("magisk")
+                || domain.equals("shell") || ctx.contains(":su:") || ctx.toLowerCase().contains("magisk"));
+        boolean missingCat = !ctx.isEmpty() && domain.startsWith("untrusted_app") && !hasCategory(ctx);
 
-        boolean isEnforcing = false;
-        if (enforce != null && !enforce.isEmpty()) {
-            String trimmed = enforce.trim();
-            isEnforcing = trimmed.equals("1") || trimmed.startsWith("1");
-        }
+        // --- 2) enforce 状态：syscall + Java 双路 ---
+        // ⚠️ Enforcing 下 untrusted_app 常被拒读 /sys/fs/selinux/enforce（读返回空）。
+        //    "读被拒 + 有合法 SELinux 上下文" → 推断 Enforcing（Permissive 不会拒读）。
+        String enfSys = trimOrEmpty(nativeDetector.readFileSyscall("/sys/fs/selinux/enforce"));
+        String enfJava = trimOrEmpty(ReflectionUtils.readFileFirstLine("/sys/fs/selinux/enforce"));
+        boolean mounted = nativeDetector.fileExistsSyscall("/sys/fs/selinux/enforce")
+                || nativeDetector.fileExistsSyscall("/sys/fs/selinux");
+        String enf = !enfSys.isEmpty() ? enfSys : enfJava;
 
-        if (!isEnforcing && getenforce != null) {
-            isEnforcing = getenforce.isEmpty() ||
-                          getenforce.equalsIgnoreCase("enforcing");
-        }
+        String state;
+        boolean inferred = false;
+        if ("1".equals(enf)) state = "Enforcing";
+        else if ("0".equals(enf)) state = "Permissive";
+        else if (hasCtx) { state = "Enforcing"; inferred = true; }  // 拒读 + 有上下文 → 推断强制
+        else if (mounted) state = "Unknown";
+        else state = "Disabled";
 
-        if (enforce == null || enforce.isEmpty()) {
-            boolean selinuxExists = nativeDetector.fileExistsSyscall("/sys/fs/selinux");
-            if (selinuxExists) {
-                isEnforcing = true;
-            }
-        }
+        // --- 3) 反伪造交叉：运行时 enforce vs 启动参数/命令行 ---
+        String bootSel = trimOrEmpty(nativeDetector.getBuildPropertyNative("ro.boot.selinux")).toLowerCase();
+        String cmdlineSel = trimOrEmpty(nativeDetector.getBootParamSyscall("androidboot.selinux")).toLowerCase();
+        boolean bootSaysPermissive = bootSel.contains("permissive") || cmdlineSel.contains("permissive");
+        // 运行时显示强制，但启动参数是 permissive → 疑似 setenforce 0 后 resetprop 伪造
+        boolean spoof = "Enforcing".equals(state) && bootSaysPermissive;
 
-        // 获取 SELinux 上下文
-        String seContext = null;
+        // --- 4) enforce 可写探测（应用本不该可写）---
+        boolean enforceWritable = false;
         try {
-            seContext = nativeDetector.getSELinuxContextNative();
+            enforceWritable = mounted && new File("/sys/fs/selinux/enforce").canWrite();
         } catch (Exception ignored) {}
 
-        item.setLayerResult(DetectionLayer.JAVA, !isEnforcing);
-        item.setLayerResult(DetectionLayer.NATIVE, !isEnforcing);
-        item.setLayerResult(DetectionLayer.SYSCALL, !isEnforcing);
+        boolean risk = "Permissive".equals(state) || "Disabled".equals(state) || rootCtx || spoof || enforceWritable;
+        boolean warn = "Unknown".equals(state) || missingCat;
 
-        if (isEnforcing) {
-            item.setStatus(DetectionStatus.SAFE);
-            String detail = "Enforcing 模式";
-            if (seContext != null && !seContext.isEmpty()) {
-                detail += " (" + seContext + ")";
-            }
-            item.setDetail(detail);
-        } else {
+        // 明细
+        item.addDetectionDetail("Enforcing".equals(state) ? "🔒 enforce" : "🔓 enforce",
+                "/sys/fs/selinux/enforce",
+                "syscall=" + (enfSys.isEmpty() ? "拒读/N/A" : enfSys) + " java=" + (enfJava.isEmpty() ? "拒读/N/A" : enfJava)
+                        + " → " + state + (inferred ? " (推断:拒读=强制)" : ""),
+                DetectionLayer.SYSCALL, "Enforcing".equals(state) ? "🟢" : "🔴");
+        if (!ctx.isEmpty()) {
+            item.addDetectionDetail(rootCtx ? "⚠️ 进程上下文" : (missingCat ? "🟡 进程上下文" : "🏷️ 进程上下文"),
+                    ctx,
+                    rootCtx ? "root/shell 上下文 — 以特权运行" : (missingCat ? "缺 category，上下文异常" : "当前进程 SELinux 上下文 (域: " + domain + ")"),
+                    DetectionLayer.NATIVE, rootCtx ? "🔴" : (missingCat ? "🟡" : "🟢"));
+        }
+        if (!bootSel.isEmpty()) item.addDetectionDetail("⚙️ ro.boot.selinux", bootSel, "启动参数", DetectionLayer.NATIVE, "🔧");
+        if (!cmdlineSel.isEmpty()) item.addDetectionDetail("📋 androidboot.selinux", cmdlineSel, "内核命令行", DetectionLayer.SYSCALL, "🔧");
+        if (spoof) item.addDetectionDetail("⚠️ 伪造嫌疑", "运行时 Enforcing 但启动为 permissive",
+                "疑似 setenforce 0 + resetprop 伪造 enforce", DetectionLayer.SYSCALL, "🔴");
+        if (enforceWritable) item.addDetectionDetail("⚠️ enforce 可写", "/sys/fs/selinux/enforce",
+                "应用可写 enforce — 异常（已 root / 无 SELinux 约束）", DetectionLayer.SYSCALL, "🔴");
+
+        item.setLayerResult(DetectionLayer.JAVA, risk);
+        item.setLayerResult(DetectionLayer.NATIVE, risk);
+        item.setLayerResult(DetectionLayer.SYSCALL, risk);
+
+        if (risk) {
             item.setStatus(DetectionStatus.RISK);
-            item.setDetail("SELinux 非强制模式 (Permissive/Disabled)");
+            item.setDetail(rootCtx ? ("进程以特权上下文运行: " + domain)
+                    : spoof ? "SELinux 状态疑似被伪造"
+                    : enforceWritable ? "enforce 可写（无 SELinux 约束）"
+                    : ("SELinux " + state + " (非强制)"));
+        } else if (warn) {
+            item.setStatus(DetectionStatus.WARNING);
+            item.setDetail(missingCat ? "进程上下文缺 category（异常）" : "SELinux 状态未知（受限不可读）");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("Enforcing 模式" + (domain.isEmpty() ? "" : " (" + domain + ")"));
         }
-
-        // 详细信息
-        item.addDetectionDetail("🔒 enforce 文件",
-            "/sys/fs/selinux/enforce",
-            "值: " + (enforce != null ? enforce.trim() : "N/A"),
-            DetectionLayer.SYSCALL, "📄");
-
-        if (getenforce != null && !getenforce.isEmpty()) {
-            item.addDetectionDetail("⚙️ ro.boot.selinux",
-                getenforce, "属性值", DetectionLayer.NATIVE, "🔧");
-        }
-
-        if (seContext != null && !seContext.isEmpty()) {
-            item.addDetectionDetail("🏷️ 安全上下文", seContext,
-                "当前进程 SELinux 上下文", DetectionLayer.NATIVE, "🔐");
-        }
-
         return item;
+    }
+
+    // ===================== 1b. SELinux 文件标签 =====================
+
+    /**
+     * 用 lgetxattr 读关键文件的 SELinux 标签（security.selinux）。
+     * Magisk magic mount / overlay 改过的文件 context 会带 magisk/su 标记。
+     * 仅对明确的 magisk/su_exec 标记报警，避免不同 ROM 标签差异导致误报。
+     */
+    private DetectionItem checkSELinuxFileLabels() {
+        DetectionItem item = new DetectionItem("SELinux 文件标签", "关键文件 security.selinux 标签 (Magisk 改文件 context 异常)");
+        String[] paths = {
+                "/system/bin/app_process64",
+                "/system/build.prop",
+                "/system/bin/sh",
+                context.getApplicationInfo().sourceDir,
+        };
+        boolean anomaly = false;
+        int readCount = 0;
+        for (String path : paths) {
+            if (path == null || path.isEmpty()) continue;
+            String label = trimOrEmpty(nativeDetector.getFileSelinuxContextNative(path));
+            if (label.isEmpty()) continue;
+            readCount++;
+            String low = label.toLowerCase();
+            boolean bad = low.contains("magisk") || low.contains("su_exec") || low.contains(":su:");
+            if (bad) anomaly = true;
+            item.addDetectionDetail(bad ? "⚠️ " + path : "🏷️ " + path, label,
+                    bad ? "含 Magisk/su 标记 — 文件被改" : "SELinux 标签", DetectionLayer.NATIVE, bad ? "🔴" : "🟢");
+        }
+
+        item.setLayerResult(DetectionLayer.JAVA, anomaly);
+        item.setLayerResult(DetectionLayer.NATIVE, anomaly);
+        item.setLayerResult(DetectionLayer.SYSCALL, anomaly);
+        if (anomaly) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("关键文件 SELinux 标签含 Magisk/su 标记");
+        } else if (readCount == 0) {
+            item.setStatus(DetectionStatus.UNKNOWN);
+            item.setDetail("无法读取文件 SELinux 标签");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("关键文件 SELinux 标签正常 (" + readCount + " 项)");
+        }
+        return item;
+    }
+
+    private static String trimOrEmpty(String s) {
+        return s == null ? "" : s.trim();
+    }
+
+    /** 从 "u:r:DOMAIN:s0:c.." 取 type/domain（第3段）。 */
+    private static String seDomain(String ctx) {
+        if (ctx == null || ctx.isEmpty()) return "";
+        String[] p = ctx.split(":");
+        return p.length >= 3 ? p[2] : "";
+    }
+
+    /** untrusted_app 正常应带 MLS category（第5段以 c 开头，如 :s0:c107,c257）。 */
+    private static boolean hasCategory(String ctx) {
+        if (ctx == null) return false;
+        String[] p = ctx.split(":");
+        return p.length >= 5 && p[4].startsWith("c");
     }
 
     // ===================== 2. 系统库代码完整性 =====================

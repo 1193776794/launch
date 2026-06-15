@@ -14,5 +14,7 @@ public enum DetectionCategory {
     READLINK,       // Readlink/symlink detection (proc, fd, mount namespace)
     ZYGOTE,         // Zygote injection detection (Zygisk/Riru/LSPosed)
     TAMPER,         // Tamper/device modification tool detection
-    BOOTLOADER      // Bootloader unlock detection
+    BOOTLOADER,     // Bootloader unlock detection
+    AUTHENTICITY,   // Device authenticity / risk-control signals (lockscreen, battery, accessibility, TEE)
+    MULTI_INSTANCE  // Multi-open container / sandbox hijack detection
 }

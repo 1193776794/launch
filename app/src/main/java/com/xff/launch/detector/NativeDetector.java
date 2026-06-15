@@ -156,6 +156,9 @@ public class NativeDetector {
     /** Get SELinux context via native */
     public native String getSELinuxContextNative();
 
+    /** 取文件的 SELinux 标签 (lgetxattr security.selinux)，检测 Magisk 改文件的 context 异常 */
+    public native String getFileSelinuxContextNative(String path);
+
     /** Check suspicious memory maps via native */
     public native int checkSuspiciousMapsNative();
 
@@ -237,6 +240,19 @@ public class NativeDetector {
     public native String getSystemProperty(String key);
     public native String getBuildPropertyNative(String propName);
     public native String getBuildPropertySyscall(String propName);
+
+    /**
+     * 通过 {@code __system_property_foreach} 遍历整个属性区取出 {@code name} 的值
+     * （对照 JD field 10-3 cmd=10）。与 {@code __system_property_get(name)} 是不同的 libc 入口，
+     * hook 单点查询对它无效 → 用作属性类指纹的"枚举全量"交叉校验路。
+     */
+    public native String getPropForeachNative(String name);
+
+    /**
+     * 全量遍历 {@code ro.*} 只读属性，排序后拼成 "k=v\n" 原始串（Java 侧统一 djb2）。
+     * 对标 JD field 10-3 的 getprop 全量 dump，作为构建级软件指纹（开机后稳定）。
+     */
+    public native String getRoPropDumpNative();
 
     // ===================== Zygote Process Detection =====================
 
@@ -393,6 +409,23 @@ public class NativeDetector {
 
     /** Vulkan 硬件指纹: vendorID|deviceID|driverVersion|deviceUUID|driverUUID (deviceUUID 跨重启稳定) */
     public native String getVulkanFingerprintNative();
+
+    /**
+     * Widevine DRM deviceUniqueId（native 侧 JNI 反射 MediaDrm 直取，绕过 Java 层 hook）。
+     * 与 Java 侧 {@code MediaDrm.getPropertyByteArray("deviceUniqueId")} 同源，
+     * 用于跨层交叉校验：两路不一致 → 暴露 Java 层 MediaDrm hook。
+     * @return 32 字节硬件 ID 的小写 hex（64 字符），失败返回空串。
+     */
+    public native String getDrmDeviceIdNative();
+
+    /**
+     * Wi-Fi 接入信息（native 侧 JNI 反射 WifiManager.getConnectionInfo 直取，绕过 Java 层 hook）。
+     * 对照 JD field 7-2(native cmd=27) vs 7-3(Java)：两路 BSSID 不一致 → 暴露 Java 层 WifiInfo hook。
+     * 需 ACCESS_WIFI_STATE + ACCESS_FINE_LOCATION 权限，否则返空。
+     * @param ctx Application Context
+     * @return "BSSID|SSID"，失败/无权限返回空串。
+     */
+    public native String getWifiInfoNative(android.content.Context ctx);
 
     // ===================== Runtime Integrity Indicators =====================
 

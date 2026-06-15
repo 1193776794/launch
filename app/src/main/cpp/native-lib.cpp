@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/vfs.h>
+#include <sys/xattr.h>
 #include <sys/utsname.h>
 #include <sys/syscall.h>
 #include <algorithm>
@@ -778,6 +779,27 @@ Java_com_xff_launch_detector_NativeDetector_getSELinuxContextNative(JNIEnv *env,
     return env->NewStringUTF(context.c_str());
 }
 
+// 取文件的 SELinux 标签：lgetxattr(path, "security.selinux")。
+// 用于检测 Magisk 改过的文件 context 异常（如 magisk_file / su_exec）。
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getFileSelinuxContextNative(JNIEnv *env, jobject thiz, jstring jpath) {
+    (void) thiz;
+    if (!jpath) return env->NewStringUTF("");
+    const char* path = env->GetStringUTFChars(jpath, nullptr);
+    char buf[256] = {0};
+    std::string result;
+    if (path) {
+        ssize_t n = lgetxattr(path, "security.selinux", buf, sizeof(buf) - 1);
+        if (n > 0) {
+            size_t len = (size_t) n;
+            while (len > 0 && buf[len - 1] == '\0') len--;  // 去掉尾部 NUL
+            result.assign(buf, len);
+        }
+        env->ReleaseStringUTFChars(jpath, path);
+    }
+    return env->NewStringUTF(result.c_str());
+}
+
 // Check suspicious maps via native
 JNIEXPORT jint JNICALL
 Java_com_xff_launch_detector_NativeDetector_checkSuspiciousMapsNative(JNIEnv *env, jobject thiz) {
@@ -1470,6 +1492,73 @@ Java_com_xff_launch_detector_NativeDetector_getBuildPropertySyscall(JNIEnv *env,
     return env->NewStringUTF(result.c_str());
 }
 
+// ===================== Property Enumeration (__system_property_foreach, JD field 10-3) =====================
+//
+// 对照 JD field 10-3 (native cmd=10)：用 __system_property_foreach + __system_property_read_callback
+// 遍历整个 /dev/__properties__ 属性区，而非 __system_property_get(name) 单点查询。
+// 价值：这是与 __system_property_get 不同的 libc 入口，hook 单点查询对它无效 →
+// 作为属性类指纹项的"枚举全量"交叉校验路；两路取值不一致即暴露属性系统被 hook。
+
+struct PropMatchCtx {
+    const char* target;
+    std::string value;
+    bool found;
+};
+
+static void prop_match_read_cb(void* cookie, const char* name, const char* value, uint32_t /*serial*/) {
+    auto* ctx = (PropMatchCtx*) cookie;
+    if (!ctx->found && name && ctx->target && strcmp(name, ctx->target) == 0) {
+        ctx->value = value ? value : "";
+        ctx->found = true;
+    }
+}
+
+static void prop_match_foreach_cb(const prop_info* pi, void* cookie) {
+    __system_property_read_callback(pi, prop_match_read_cb, cookie);
+}
+
+// 遍历全部属性，取出 name 对应的值（绕过 __system_property_get 单点 hook）
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getPropForeachNative(JNIEnv *env, jobject thiz, jstring propName) {
+    (void) thiz;
+    const char* propStr = env->GetStringUTFChars(propName, nullptr);
+    PropMatchCtx ctx{ propStr, "", false };
+    __system_property_foreach(prop_match_foreach_cb, &ctx);
+    if (propStr) env->ReleaseStringUTFChars(propName, propStr);
+    return env->NewStringUTF(ctx.value.c_str());
+}
+
+struct PropDumpCtx {
+    std::vector<std::string> lines;
+};
+
+static void prop_dump_read_cb(void* cookie, const char* name, const char* value, uint32_t /*serial*/) {
+    auto* ctx = (PropDumpCtx*) cookie;
+    // 仅收集 ro.* 只读属性（开机后稳定，构建级软件指纹），剔除运行时易变的 net.*/persist.* 等
+    if (name && strncmp(name, "ro.", 3) == 0) {
+        ctx->lines.emplace_back(std::string(name) + "=" + (value ? value : ""));
+    }
+}
+
+static void prop_dump_foreach_cb(const prop_info* pi, void* cookie) {
+    __system_property_read_callback(pi, prop_dump_read_cb, cookie);
+}
+
+// 全量遍历 ro.* 属性，排序后拼成 "k=v\n" 原始串（Java 侧统一做 djb2，避免重复实现哈希）
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getRoPropDumpNative(JNIEnv *env, jobject thiz) {
+    (void) thiz;
+    PropDumpCtx ctx;
+    __system_property_foreach(prop_dump_foreach_cb, &ctx);
+    std::sort(ctx.lines.begin(), ctx.lines.end());
+    std::string out;
+    for (const auto& line : ctx.lines) {
+        out += line;
+        out += '\n';
+    }
+    return env->NewStringUTF(out.c_str());
+}
+
 // ===================== Kernel File Reading =====================
 
 // Helper function to read file using native libc
@@ -2034,7 +2123,6 @@ static std::string collect_selinux_fp(bool use_syscall) {
     while (!enforce.empty() && (enforce.back() == '\n' || enforce.back() == '\r' || enforce.back() == ' ')) {
         enforce.pop_back();
     }
-    std::string state = (enforce == "1") ? "Enforcing" : "Permissive";
 
     std::string context = use_syscall
         ? syscall_read_file("/proc/self/attr/current", 256)
@@ -2043,6 +2131,14 @@ static std::string collect_selinux_fp(bool use_syscall) {
            context.back() == '\r' || context.back() == ' ')) {
         context.pop_back();
     }
+
+    // ⚠️ Enforcing 下 App 常被拒读 enforce（返回空）。空且有合法上下文 → 推断 Enforcing，
+    //    不能直接当 Permissive（修复旧逻辑把"拒读"误报成 Permissive 的 bug）。
+    std::string state;
+    if (enforce == "1") state = "Enforcing";
+    else if (enforce == "0") state = "Permissive";
+    else state = (context.rfind("u:", 0) == 0) ? "Enforcing" : "Unknown";
+
     // Truncate at 3rd colon: "u:r:untrusted_app:s0:c512" -> "u:r:untrusted_app"
     int colonCount = 0;
     for (size_t i = 0; i < context.size(); i++) {
@@ -2578,6 +2674,131 @@ Java_com_xff_launch_detector_NativeDetector_getVulkanFingerprintNative(JNIEnv *e
     }
     dlclose(lib);
     return env->NewStringUTF(result.c_str());
+}
+
+// ===================== Widevine DRM Device ID (native JNI reflection) =====================
+
+// 在 native 侧用 JNI 反射调用 MediaDrm.getPropertyByteArray("deviceUniqueId")，
+// 绕过 Java 层对 MediaDrm 的 hook。与 Java 侧 drm_id 同源，服务端/本地交叉校验：
+// 两路 hex 不一致 → 暴露 Java 层 MediaDrm hook。
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getDrmDeviceIdNative(JNIEnv *env, jobject thiz) {
+    (void) thiz;
+    // 任一步抛异常即清理并返回空串
+    #define DRM_FAIL() do { if (env->ExceptionCheck()) env->ExceptionClear(); return env->NewStringUTF(""); } while (0)
+
+    // Widevine 标准 UUID = EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED
+    const jlong msb = (jlong) 0xEDEF8BA979D64ACEULL;
+    const jlong lsb = (jlong) 0xA3C827DCD51D21EDULL;
+
+    // 1) new java.util.UUID(msb, lsb)
+    jclass uuidCls = env->FindClass("java/util/UUID");
+    if (env->ExceptionCheck() || !uuidCls) DRM_FAIL();
+    jmethodID uuidCtor = env->GetMethodID(uuidCls, "<init>", "(JJ)V");
+    if (env->ExceptionCheck() || !uuidCtor) DRM_FAIL();
+    jobject uuid = env->NewObject(uuidCls, uuidCtor, msb, lsb);
+    if (env->ExceptionCheck() || !uuid) DRM_FAIL();
+
+    // 2) new android.media.MediaDrm(uuid)
+    jclass drmCls = env->FindClass("android/media/MediaDrm");
+    if (env->ExceptionCheck() || !drmCls) DRM_FAIL();
+    jmethodID drmCtor = env->GetMethodID(drmCls, "<init>", "(Ljava/util/UUID;)V");
+    if (env->ExceptionCheck() || !drmCtor) DRM_FAIL();
+    jobject drm = env->NewObject(drmCls, drmCtor, uuid);
+    if (env->ExceptionCheck() || !drm) DRM_FAIL();
+
+    // 3) byte[] getPropertyByteArray("deviceUniqueId")
+    jmethodID getProp = env->GetMethodID(drmCls, "getPropertyByteArray", "(Ljava/lang/String;)[B");
+    if (env->ExceptionCheck() || !getProp) DRM_FAIL();
+    jstring key = env->NewStringUTF("deviceUniqueId");
+    jbyteArray arr = (jbyteArray) env->CallObjectMethod(drm, getProp, key);
+    bool threw = env->ExceptionCheck();
+
+    std::string hex;
+    if (!threw && arr) {
+        jsize len = env->GetArrayLength(arr);
+        jbyte *bytes = env->GetByteArrayElements(arr, nullptr);
+        if (bytes && len > 0) {
+            static const char *HEX = "0123456789abcdef";
+            hex.reserve(len * 2);
+            for (jsize i = 0; i < len; i++) {
+                unsigned char b = (unsigned char) bytes[i];
+                hex.push_back(HEX[b >> 4]);
+                hex.push_back(HEX[b & 0x0F]);
+            }
+            env->ReleaseByteArrayElements(arr, bytes, JNI_ABORT);
+        }
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    // 4) 释放 MediaDrm：close()(API28+) 优先，否则 release()
+    jmethodID closeM = env->GetMethodID(drmCls, "close", "()V");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (closeM) {
+        env->CallVoidMethod(drm, closeM);
+    } else {
+        jmethodID releaseM = env->GetMethodID(drmCls, "release", "()V");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (releaseM) env->CallVoidMethod(drm, releaseM);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    return env->NewStringUTF(hex.c_str());
+    #undef DRM_FAIL
+}
+
+// ===================== Wi-Fi 接入信息 (native JNI reflection) =====================
+
+// 在 native 侧用 JNI 反射调用 WifiManager.getConnectionInfo().getBSSID()/getSSID()，
+// 绕过 Java 层对 android.net.wifi.WifiInfo 的 hook。对照 JD field 7-2(native) vs 7-3(Java)：
+// 两路 BSSID 不一致 → 暴露 Java 层 WifiInfo hook。返回 "BSSID|SSID"。
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getWifiInfoNative(JNIEnv *env, jobject thiz, jobject ctx) {
+    (void) thiz;
+    #define WIFI_FAIL() do { if (env->ExceptionCheck()) env->ExceptionClear(); return env->NewStringUTF(""); } while (0)
+    if (!ctx) return env->NewStringUTF("");
+
+    // ctx.getSystemService("wifi")
+    jclass ctxCls = env->GetObjectClass(ctx);
+    if (env->ExceptionCheck() || !ctxCls) WIFI_FAIL();
+    jmethodID getSvc = env->GetMethodID(ctxCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    if (env->ExceptionCheck() || !getSvc) WIFI_FAIL();
+    jstring svcName = env->NewStringUTF("wifi");
+    jobject wm = env->CallObjectMethod(ctx, getSvc, svcName);
+    if (env->ExceptionCheck() || !wm) WIFI_FAIL();
+
+    // wm.getConnectionInfo() -> WifiInfo
+    jclass wmCls = env->FindClass("android/net/wifi/WifiManager");
+    if (env->ExceptionCheck() || !wmCls) WIFI_FAIL();
+    jmethodID getConn = env->GetMethodID(wmCls, "getConnectionInfo", "()Landroid/net/wifi/WifiInfo;");
+    if (env->ExceptionCheck() || !getConn) WIFI_FAIL();
+    jobject wi = env->CallObjectMethod(wm, getConn);
+    if (env->ExceptionCheck() || !wi) WIFI_FAIL();
+
+    // wi.getBSSID() / wi.getSSID()
+    jclass wiCls = env->FindClass("android/net/wifi/WifiInfo");
+    if (env->ExceptionCheck() || !wiCls) WIFI_FAIL();
+    jmethodID getBssid = env->GetMethodID(wiCls, "getBSSID", "()Ljava/lang/String;");
+    jmethodID getSsid = env->GetMethodID(wiCls, "getSSID", "()Ljava/lang/String;");
+    if (env->ExceptionCheck() || !getBssid || !getSsid) WIFI_FAIL();
+
+    std::string result;
+    jstring bssid = (jstring) env->CallObjectMethod(wi, getBssid);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (bssid) {
+        const char *b = env->GetStringUTFChars(bssid, nullptr);
+        if (b) { result += b; env->ReleaseStringUTFChars(bssid, b); }
+    }
+    result += "|";
+    jstring ssid = (jstring) env->CallObjectMethod(wi, getSsid);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (ssid) {
+        const char *s = env->GetStringUTFChars(ssid, nullptr);
+        if (s) { result += s; env->ReleaseStringUTFChars(ssid, s); }
+    }
+
+    return env->NewStringUTF(result.c_str());
+    #undef WIFI_FAIL
 }
 
 // ===================== Compatibility Method =====================

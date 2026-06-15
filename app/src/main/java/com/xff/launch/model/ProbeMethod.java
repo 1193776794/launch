@@ -16,6 +16,7 @@ public enum ProbeMethod {
     JAVA_FILE("Java 文件", "📄", Tier.HIGH),       // 📄 Java 读 /proc·/sys
     NATIVE_PROP("属性 native", "⚙", Tier.MID),          // ⚙
     NATIVE_FILE("JNI 文件", "🔧", Tier.MID),       // 🔧
+    NATIVE_FOREACH("属性遍历 native", "🔁", Tier.LOW), // 🔁 __system_property_foreach 枚举全量
     SYSCALL("系统调用", "🛡", Tier.LOW),           // 🛡
     MMAP("内存 mmap", "🧠", Tier.LOW);            // 🧠
 

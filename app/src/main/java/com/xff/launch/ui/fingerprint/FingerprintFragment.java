@@ -1,8 +1,10 @@
 package com.xff.launch.ui.fingerprint;
 
+import android.Manifest;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.os.Bundle;
 import android.view.LayoutInflater;
@@ -12,6 +14,8 @@ import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
@@ -57,6 +61,18 @@ public class FingerprintFragment extends Fragment {
     private NativeDetector nativeDetector;
     private final FingerprintEngine engine = new FingerprintEngine();
 
+    // 经纬度/基站/Wi-Fi 位置指纹需定位权限，授予/拒绝后都重采一次刷新结果
+    private ActivityResultLauncher<String[]> locationPermLauncher;
+    private boolean locationRequested = false;
+
+    @Override
+    public void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        locationPermLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestMultiplePermissions(),
+                granted -> { if (isAdded()) collectFingerprints(); });
+    }
+
     @Nullable
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container,
@@ -72,6 +88,21 @@ public class FingerprintFragment extends Fragment {
         initViews(view);
         setupCopyButtons();
         collectFingerprints();
+        maybeRequestLocationPermission();
+    }
+
+    /** 首次进入若无定位权限则申请一次（用于经纬度/基站/Wi-Fi BSSID 位置指纹）。 */
+    private void maybeRequestLocationPermission() {
+        if (locationRequested || locationPermLauncher == null || !isAdded()) return;
+        boolean granted = ContextCompat.checkSelfPermission(requireContext(),
+                Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        if (!granted) {
+            locationRequested = true;
+            locationPermLauncher.launch(new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+            });
+        }
     }
 
     private void initViews(View view) {

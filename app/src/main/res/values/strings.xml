@@ -48,6 +48,8 @@
     <string name="category_zygote">Zygote 注入</string>
     <string name="category_tamper">改机/云控</string>
     <string name="category_bootloader">Bootloader 解锁</string>
+    <string name="category_authenticity">设备真实度</string>
+    <string name="category_multi_instance">多开/沙箱</string>
 
     <!-- Zygote Detection Items -->
     <string name="detect_zygisk">Zygisk 注入</string>

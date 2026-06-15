@@ -9,12 +9,12 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.StatFs;
 import android.provider.Settings;
-import android.util.Base64;
 import android.util.DisplayMetrics;
 
 import com.xff.launch.detector.NativeDetector;
 import com.xff.launch.model.FingerprintSpec;
 import com.xff.launch.util.HwProbe;
+import com.xff.launch.util.LocationProbe;
 import com.xff.launch.util.ReflectionUtils;
 import com.xff.launch.util.WebProbe;
 
@@ -33,6 +33,7 @@ import static com.xff.launch.model.ProbeMethod.JAVA_FILE;
 import static com.xff.launch.model.ProbeMethod.JAVA_REFLECT;
 import static com.xff.launch.model.ProbeMethod.MMAP;
 import static com.xff.launch.model.ProbeMethod.NATIVE_FILE;
+import static com.xff.launch.model.ProbeMethod.NATIVE_FOREACH;
 import static com.xff.launch.model.ProbeMethod.NATIVE_PROP;
 import static com.xff.launch.model.ProbeMethod.SYSCALL;
 
@@ -94,10 +95,23 @@ public final class FingerprintDefinitions {
                 .probe(NATIVE_FILE, "getCpuHardware (native)", () -> nd.getCpuHardware())
                 .probe(SYSCALL, "getCpuHardware (syscall)", () -> nd.getCpuHardwareSyscall())
                 .probe(JAVA_API, "Build.HARDWARE", () -> Build.HARDWARE)
-                .probe(NATIVE_PROP, "__system_property_get(ro.hardware)", () -> nd.getBuildPropertyNative("ro.hardware")));
+                .probe(NATIVE_PROP, "__system_property_get(ro.hardware)", () -> nd.getBuildPropertyNative("ro.hardware"))
+                .probe(NATIVE_FOREACH, "__system_property_foreach(ro.hardware)", () -> nd.getPropForeachNative("ro.hardware")));
 
+        // soc_serial/soc_id 走 /sys/devices/soc0（高通路径，MTK 无该文件且 root 专属，应用读不到→常 N/A）
         specs.add(fileItem("soc_serial", "SoC 序列号", HashTag.HARDWARE, "/sys/devices/soc0/serial_number", nd));
         specs.add(fileItem("soc_id", "SoC ID", HashTag.HARDWARE, "/sys/devices/soc0/soc_id", nd));
+
+        // ⭐ SoC 型号/厂商 —— 应用可读属性，sysfs soc0 被 SELinux 封时的 SoC 指纹替代源
+        // (如高通 SDM/SM、联发科 MT6833V/PNZA)。多路：反射/native/foreach 交叉。
+        specs.add(define("soc_model", "SoC 型号", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_REFLECT, "SystemProperties(ro.soc.model)", () -> ReflectionUtils.getSystemProperty("ro.soc.model"))
+                .probe(NATIVE_PROP, "__system_property_get(ro.soc.model)", () -> nd.getBuildPropertyNative("ro.soc.model"))
+                .probe(NATIVE_FOREACH, "__system_property_foreach(ro.soc.model)", () -> nd.getPropForeachNative("ro.soc.model")));
+        specs.add(define("soc_manufacturer", "SoC 厂商", Group.HARDWARE, HashTag.HARDWARE)
+                .probe(JAVA_REFLECT, "SystemProperties(ro.soc.manufacturer)", () -> ReflectionUtils.getSystemProperty("ro.soc.manufacturer"))
+                .probe(NATIVE_PROP, "__system_property_get(ro.soc.manufacturer)", () -> nd.getBuildPropertyNative("ro.soc.manufacturer"))
+                .probe(NATIVE_FOREACH, "__system_property_foreach(ro.soc.manufacturer)", () -> nd.getPropForeachNative("ro.soc.manufacturer")));
 
         // ==================== Boot 参数 ====================
 
@@ -107,8 +121,23 @@ public final class FingerprintDefinitions {
 
         // ==================== 其它系统 ID ====================
 
+        // DRM ID 双源交叉：Java MediaDrm vs native JNI 反射 MediaDrm。
+        // 两路 hex 不一致 → 暴露 Java 层 MediaDrm.getPropertyByteArray hook（多路投票自动标红）。
         specs.add(define("drm_id", "DRM ID (Widevine)", Group.HARDWARE, HashTag.HARDWARE)
-                .probe(JAVA_API, "MediaDrm 设备唯一ID", () -> getWidevineDeviceId()));
+                .probe(JAVA_API, "MediaDrm.getPropertyByteArray", () -> getWidevineDeviceId())
+                .probe(NATIVE_FILE, "MediaDrm JNI 反射 (native·绕 Java hook)", () -> nd.getDrmDeviceIdNative()));
+
+        // UID 四源交叉校验（反 Hook 一致性，非稳定 ID 故 weight(0) 不进 composite）。
+        // 四源任一被选择性 hook（如只改 Process.myUid）→ 取值不一致 → 自动标红暴露。
+        // 对应 JD field 1-5：/proc/self/status · ApplicationInfo · PackageManager · Process.myUid
+        specs.add(define("uid_consistency", "UID 一致性 (反Hook)", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "Process.myUid()", () -> String.valueOf(android.os.Process.myUid()))
+                .probe(JAVA_API, "ApplicationInfo.uid", () -> String.valueOf(ctx.getApplicationInfo().uid))
+                .probe(JAVA_REFLECT, "PackageManager.getApplicationInfo().uid", () -> getPmUid(ctx))
+                .probe(JAVA_FILE, "/proc/self/status Uid", "/proc/self/status",
+                        () -> getStatusUid(ReflectionUtils.readFile("/proc/self/status")))
+                .probe(SYSCALL, "/proc/self/status Uid (syscall)", "/proc/self/status",
+                        () -> getStatusUid(nd.readFileSyscall("/proc/self/status"))));
 
         specs.add(propItem("vbmeta_digest", "VBMeta 摘要", HashTag.SOFTWARE, "ro.boot.vbmeta.digest", nd));
         specs.add(propItem("build_id", "Build ID", HashTag.SOFTWARE, "ro.build.id", ReflectionUtils::getId, null, nd));
@@ -213,9 +242,11 @@ public final class FingerprintDefinitions {
         specs.add(define("cpuinfo_hash", "CPUInfo 全量 Hash", Group.HARDWARE, HashTag.HARDWARE)
                 .probe(JAVA_FILE, "djb2(/proc/cpuinfo)", "/proc/cpuinfo", () -> HwProbe.fileHash("/proc/cpuinfo")));
 
-        // 输入设备指纹
+        // 输入设备指纹 —— InputDevice API（免权限、不依赖 /proc 可读性）+ /proc 文件（rooted/旧机兜底）
+        // 注：两路逻辑值不同（API 描述符 hash vs 文件内容 hash），文件常被 SELinux 封而返空，
+        //     因此以 API 为主探针；文件路仅在可读设备补充，不参与同值投票故拆成两项。
         specs.add(define("input_devices", "输入设备指纹", Group.HARDWARE, HashTag.HARDWARE)
-                .probe(JAVA_FILE, "djb2(input/devices)", "/proc/bus/input/devices", () -> HwProbe.fileHash("/proc/bus/input/devices")));
+                .probe(JAVA_API, "InputDevice 描述符集 (API)", () -> HwProbe.inputDevicesApi()));
 
         // Device-Tree compatible（机型/板型）
         specs.add(define("device_tree", "Device-Tree 标识", Group.HARDWARE, HashTag.HARDWARE)
@@ -258,12 +289,46 @@ public final class FingerprintDefinitions {
                 .probe(JAVA_API, "OUTPUT_SAMPLE_RATE/FRAMES", () -> HwProbe.audioFingerprint(ctx)));
 
         // 系统属性全量 hash —— 构建级软件指纹
+        // 两路交叉：Java 反射逐个 getprop(固定 key 集) vs native __system_property_foreach 枚举全量；
+        // 两路对同一 key 集取值不一致 → 暴露 SystemProperties / __system_property_get 被 hook
         specs.add(define("prop_set_hash", "系统属性全量 Hash", Group.SYSTEM, HashTag.SOFTWARE)
-                .probe(JAVA_REFLECT, "djb2(ro.* 属性集)", () -> HwProbe.propSetHash()));
+                .probe(JAVA_REFLECT, "djb2(ro.* 固定 key 集)", () -> HwProbe.propSetHash())
+                .probe(NATIVE_FOREACH, "djb2(foreach 同 key 集)", () -> ReflectionUtils.djb2Hash(HwProbe.propSetDumpForeach(nd))));
+
+        // ⭐ ro.* 属性全量遍历指纹（对标 JD field 10-3 cmd=10 getprop dump）
+        // native __system_property_foreach 直读 /dev/__properties__ 枚举全部 ro.* → 排序 → djb2。
+        // 比 Build.* 反射 / __system_property_get 单点更难绕过（不同 libc 入口，枚举全量）。
+        specs.add(define("prop_dump", "ro.* 全量属性指纹", Group.SYSTEM, HashTag.SOFTWARE)
+                .probe(NATIVE_FOREACH, "djb2(foreach ro.* 全量)", () -> {
+                    String dump = nd.getRoPropDumpNative();
+                    return (dump == null || dump.isEmpty()) ? "" : ReflectionUtils.djb2Hash(dump);
+                }));
 
         // 内核配置 hash
         specs.add(define("kernel_config", "内核配置 Hash", Group.SYSTEM, HashTag.SOFTWARE)
                 .probe(JAVA_FILE, "gunzip(/proc/config.gz)", "/proc/config.gz", () -> HwProbe.kernelConfigHash()));
+
+        // ==================== ROM / APK 完整性指纹（对照 JD field 17 文件系统完整性+APK指纹）====================
+
+        // ⭐ /system/lib64 全部 .so 列表 hash —— 最强系统库指纹，模拟器/裁剪 ROM 库少立判
+        specs.add(define("system_lib_list", "系统库列表指纹", Group.SYSTEM, HashTag.SOFTWARE)
+                .probe(JAVA_FILE, "djb2(/system/lib64 列表)", "/system/lib64", () -> HwProbe.systemDirListHash("/system/lib64")));
+
+        // /system/framework jar 列表 hash —— 厂商定制 jar 组合 = ROM 指纹
+        specs.add(define("system_framework_list", "Framework 列表指纹", Group.SYSTEM, HashTag.SOFTWARE)
+                .probe(JAVA_FILE, "djb2(/system/framework 列表)", "/system/framework", () -> HwProbe.systemDirListHash("/system/framework")));
+
+        // ⭐ APK 签名证书 SHA256 —— 反重打包/克隆 App 的标准指纹
+        specs.add(define("apk_signature", "APK 签名证书", Group.IDENTITY, HashTag.SOFTWARE)
+                .probe(JAVA_API, "签名证书 SHA256", () -> HwProbe.apkSignatureHash(ctx)));
+
+        // /system/build.prop 修改时间 —— 真机≈烧机固定值(2009)，改 ROM/模拟器为打包真时间
+        specs.add(define("build_prop_mtime", "build.prop 修改时间", Group.SYSTEM, HashTag.SOFTWARE)
+                .probe(JAVA_FILE, "/system/build.prop lastModified", "/system/build.prop", () -> HwProbe.buildPropMtime()));
+
+        // APK 安装路径 —— nativeLibraryDir|sourceDir，含 fake-libs/重装随机段（易变故 weight0 不进 composite）
+        specs.add(define("apk_paths", "APK 安装路径", Group.SYSTEM, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "nativeLibraryDir|sourceDir", () -> HwProbe.apkPaths(ctx)));
 
         // ==================== WebView 侧指纹（独立取证链·机型相关）====================
 
@@ -287,6 +352,54 @@ public final class FingerprintDefinitions {
                 })
                 .probe(JAVA_API, "WebView WebGL renderer", () -> HwProbe.normalizeGpuRenderer(WebProbe.webglRenderer(ctx))));
 
+        // ==================== 网络位置指纹（经纬度/基站/GPS/Wi-Fi — 对照 JD field 7）====================
+        // 位置类随环境变化，全部 weight(0) 不进 composite、HashTag.NONE 仅作信息展示与交叉校验。
+        // 风控对照：经纬度须与 Wi-Fi BSSID 反查位置吻合；frm 永远 gps/cache 可疑；
+        //          acc=0 且 gps 源异常；alt 恒 0 多为模拟器；t=0 从未定位。
+
+        // GPS/网络 经纬度
+        specs.add(define("geo_coordinate", "经纬度 (lat,lng)", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "LocationManager 末次定位", () -> LocationProbe.coordinate(ctx)));
+
+        // 定位来源 frm —— 永远 gps 罕见 / 永远 cache 静止或 hook
+        specs.add(define("geo_source", "定位来源 (frm)", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "Location.getProvider", () -> LocationProbe.source(ctx)));
+
+        // 定位精度 acc —— GPS 室外 5-20m / 网络 30-3000m；acc=0 且 gps 源异常
+        specs.add(define("geo_accuracy", "定位精度 (acc)", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "Location.getAccuracy", () -> LocationProbe.accuracy(ctx)));
+
+        // 海拔 alt —— 模拟器多数恒 0
+        specs.add(define("geo_altitude", "海拔 (alt)", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "Location.getAltitude", () -> LocationProbe.altitude(ctx)));
+
+        // 定位时刻 t —— t=0 从未定位 / 远小于当前为缓存过期
+        specs.add(define("geo_time", "定位时刻 (t)", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "Location.getTime", () -> LocationProbe.time(ctx)));
+
+        // 基站信息 —— 制式/mcc/mnc/lac-tac/cid-ci-nci/pci，与经纬度交叉
+        specs.add(define("cell_info", "基站信息", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "TelephonyManager.getAllCellInfo", () -> LocationProbe.cellInfo(ctx)));
+
+        // Wi-Fi 接入 BSSID —— Java vs native JNI 反射交叉（对照 JD 7-2 vs 7-3，不一致即 WifiInfo 被 hook）
+        specs.add(define("wifi_bssid", "Wi-Fi BSSID", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "WifiInfo.getBSSID", () -> LocationProbe.wifiBssid(ctx))
+                .probe(NATIVE_FILE, "JNI 反射 WifiInfo.getBSSID (native·绕 Java hook)", () -> {
+                    String s = nd.getWifiInfoNative(ctx);
+                    if (s == null || s.isEmpty()) return "";
+                    int bar = s.indexOf('|');
+                    String b = bar >= 0 ? s.substring(0, bar) : s;
+                    return b.toLowerCase(Locale.ROOT);
+                }));
+
+        // Wi-Fi 接入 SSID
+        specs.add(define("wifi_ssid", "Wi-Fi SSID", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "WifiInfo.getSSID", () -> LocationProbe.wifiSsid(ctx)));
+
+        // 周边热点扫描 —— 物理位置指纹 / 农场机识别（同机房周边 SSID 相同）
+        specs.add(define("wifi_scan", "周边 Wi-Fi 热点", Group.RUNTIME, HashTag.NONE).weight(0)
+                .probe(JAVA_API, "WifiManager.getScanResults", () -> LocationProbe.wifiScan(ctx)));
+
         return specs;
     }
 
@@ -306,16 +419,18 @@ public final class FingerprintDefinitions {
         if (reflect != null) spec.probe(JAVA_REFLECT, "Build 反射", reflect);
         if (direct != null) spec.probe(JAVA_API, "Build 直读", direct);
         spec.probe(NATIVE_PROP, "__system_property_get(" + prop + ")", () -> nd.getBuildPropertyNative(prop));
+        spec.probe(NATIVE_FOREACH, "__system_property_foreach(" + prop + ")", () -> nd.getPropForeachNative(prop));
         spec.probe(SYSCALL, prop + " (syscall)", () -> nd.getBuildPropertySyscall(prop));
         spec.probe(MMAP, prop + " (mmap)", "/dev/__properties__", () -> nd.readDevPropertyMmap(prop));
         return spec;
     }
 
-    /** 仅靠系统属性（无对应 Build 字段）的模板：反射 SystemProperties + native/syscall/mmap。 */
+    /** 仅靠系统属性（无对应 Build 字段）的模板：反射 SystemProperties + native/foreach/syscall/mmap。 */
     private static FingerprintSpec propItem(String id, String name, HashTag hash, String prop, NativeDetector nd) {
         FingerprintSpec spec = define(id, name, Group.IDENTITY, hash);
         spec.probe(JAVA_REFLECT, "SystemProperties.get(" + prop + ")", () -> ReflectionUtils.getSystemProperty(prop));
         spec.probe(NATIVE_PROP, "__system_property_get(" + prop + ")", () -> nd.getBuildPropertyNative(prop));
+        spec.probe(NATIVE_FOREACH, "__system_property_foreach(" + prop + ")", () -> nd.getPropForeachNative(prop));
         spec.probe(SYSCALL, prop + " (syscall)", () -> nd.getBuildPropertySyscall(prop));
         spec.probe(MMAP, prop + " (mmap)", "/dev/__properties__", () -> nd.readDevPropertyMmap(prop));
         return spec;
@@ -340,7 +455,8 @@ public final class FingerprintDefinitions {
                 .probe(SYSCALL, "getBootParam (syscall)", () -> nd.getBootParamSyscall(param));
         if (prop != null) {
             spec.probe(JAVA_REFLECT, "SystemProperties " + prop, () -> ReflectionUtils.getSystemProperty(prop))
-                .probe(NATIVE_PROP, "__system_property_get(" + prop + ")", () -> nd.getBuildPropertyNative(prop));
+                .probe(NATIVE_PROP, "__system_property_get(" + prop + ")", () -> nd.getBuildPropertyNative(prop))
+                .probe(NATIVE_FOREACH, "__system_property_foreach(" + prop + ")", () -> nd.getPropForeachNative(prop));
         }
         return spec;
     }
@@ -445,13 +561,45 @@ public final class FingerprintDefinitions {
             mediaDrm = new MediaDrm(WIDEVINE_UUID);
             byte[] deviceId = mediaDrm.getPropertyByteArray(MediaDrm.PROPERTY_DEVICE_UNIQUE_ID);
             if (deviceId != null && deviceId.length > 0) {
-                return Base64.encodeToString(deviceId, Base64.NO_WRAP);
+                // 小写 hex：与 native getDrmDeviceIdNative() 同形，便于多路投票交叉校验
+                return bytesToHex(deviceId);
             }
         } catch (Exception ignored) {
         } finally {
             if (mediaDrm != null) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) mediaDrm.close();
                 else mediaDrm.release();
+            }
+        }
+        return "";
+    }
+
+    private static String bytesToHex(byte[] data) {
+        final char[] HEX = "0123456789abcdef".toCharArray();
+        StringBuilder sb = new StringBuilder(data.length * 2);
+        for (byte b : data) {
+            sb.append(HEX[(b >> 4) & 0x0F]).append(HEX[b & 0x0F]);
+        }
+        return sb.toString();
+    }
+
+    /** PackageManager 查到的 App UID（独立于 Context 缓存的一路）。 */
+    private static String getPmUid(Context ctx) {
+        try {
+            return String.valueOf(
+                    ctx.getPackageManager().getApplicationInfo(ctx.getPackageName(), 0).uid);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 从 /proc/self/status 解析内核视角的 real UID（"Uid:" 行第一个数字）。 */
+    private static String getStatusUid(String statusContent) {
+        if (statusContent == null || statusContent.isEmpty()) return "";
+        for (String line : statusContent.split("\n")) {
+            if (line.startsWith("Uid:")) {
+                String[] parts = line.substring(4).trim().split("\\s+");
+                if (parts.length > 0 && !parts[0].isEmpty()) return parts[0];
             }
         }
         return "";
@@ -478,8 +626,13 @@ public final class FingerprintDefinitions {
 
     private static String collectSELinuxJava() {
         String enforce = ReflectionUtils.readFileFirstLine("/sys/fs/selinux/enforce");
-        String state = "1".equals(enforce) ? "Enforcing" : "Permissive";
         String context = ReflectionUtils.readFileFirstLine("/proc/self/attr/current");
+        // ⚠️ Enforcing 下 App 常被拒读 enforce（返回空）。空且有合法上下文 → 推断 Enforcing，
+        //    不能直接当 Permissive（旧逻辑 bug：把"拒读"误报成 Permissive）。
+        String state;
+        if ("1".equals(enforce)) state = "Enforcing";
+        else if ("0".equals(enforce)) state = "Permissive";
+        else state = (context != null && context.startsWith("u:")) ? "Enforcing" : "Unknown";
         if (context != null && !context.isEmpty()) {
             int colonCount = 0;
             for (int i = 0; i < context.length(); i++) {

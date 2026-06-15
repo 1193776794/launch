@@ -1,6 +1,13 @@
 package com.xff.launch.util;
 
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
 import android.hardware.Sensor;
 import android.hardware.SensorManager;
 import android.hardware.camera2.CameraCharacteristics;
@@ -14,9 +21,12 @@ import android.opengl.EGLContext;
 import android.opengl.EGLDisplay;
 import android.opengl.EGLSurface;
 import android.opengl.GLES20;
+import android.os.Build;
 import android.util.SizeF;
+import android.view.InputDevice;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -231,6 +241,13 @@ public final class HwProbe {
             }
         }
         String tech = ReflectionUtils.readFileFirstLine("/sys/class/power_supply/battery/technology");
+        if (tech == null || tech.isEmpty()) {
+            // sysfs 多数设备对 App 不可读 → 从 BATTERY_CHANGED intent 取（无需权限，稳定可得）
+            try {
+                Intent bi = ctx.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                if (bi != null) tech = bi.getStringExtra(android.os.BatteryManager.EXTRA_TECHNOLOGY);
+            } catch (Throwable ignored) {}
+        }
         String s = cap + "|" + (tech == null ? "" : tech.trim());
         return s.equals("|") ? "" : s;
     }
@@ -493,6 +510,20 @@ public final class HwProbe {
         return hash(sb.toString());
     }
 
+    /**
+     * 与 {@link #propSetHash()} 完全相同的拼串格式，但取值走 native
+     * {@code __system_property_foreach}（对照 JD field 10-3）而非 Java 反射。
+     * 调用方对返回串做 djb2 即可与 propSetHash 交叉：两路不一致 → 属性系统被 hook。
+     */
+    public static String propSetDumpForeach(com.xff.launch.detector.NativeDetector nd) {
+        StringBuilder sb = new StringBuilder();
+        for (String k : PROP_KEYS) {
+            String v = nd.getPropForeachNative(k);
+            sb.append(k).append('=').append(v == null ? "" : v).append('\n');
+        }
+        return sb.toString();
+    }
+
     // ==================== 内核配置 hash ====================
 
     /** /proc/config.gz 解压后 djb2（构建级，高版本可能不可读）。 */
@@ -509,6 +540,95 @@ public final class HwProbe {
             return "";
         } finally {
             try { if (in != null) in.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    // ==================== ROM / APK 完整性指纹（对照 JD field 17）====================
+
+    /** 列出目录文件名（排序）后 djb2——/system/lib64、/system/framework 的 ROM 库指纹。 */
+    public static String systemDirListHash(String dir) {
+        try {
+            String[] names = new File(dir).list();
+            if (names == null || names.length == 0) return "";
+            Arrays.sort(names);
+            StringBuilder sb = new StringBuilder();
+            for (String n : names) sb.append(n).append(';');
+            return hash(sb.toString());
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** APK 签名证书 SHA-256（反重打包/克隆指纹）。 */
+    public static String apkSignatureHash(Context ctx) {
+        try {
+            PackageManager pm = ctx.getPackageManager();
+            String pkg = ctx.getPackageName();
+            byte[] certBytes = null;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                PackageInfo pi = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES);
+                SigningInfo si = pi.signingInfo;
+                if (si != null) {
+                    Signature[] sigs = si.hasMultipleSigners()
+                            ? si.getApkContentsSigners() : si.getSigningCertificateHistory();
+                    if (sigs != null && sigs.length > 0) certBytes = sigs[0].toByteArray();
+                }
+            } else {
+                @SuppressWarnings("deprecation")
+                PackageInfo pi = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES);
+                if (pi.signatures != null && pi.signatures.length > 0) certBytes = pi.signatures[0].toByteArray();
+            }
+            if (certBytes == null) return "";
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] dig = md.digest(certBytes);
+            StringBuilder sb = new StringBuilder(dig.length * 2);
+            for (byte b : dig) {
+                String h = Integer.toHexString(0xff & b);
+                if (h.length() == 1) sb.append('0');
+                sb.append(h);
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** /system/build.prop 最后修改时间（真机≈烧机固定值；改 ROM/模拟器异常）。 */
+    public static String buildPropMtime() {
+        try {
+            long m = new File("/system/build.prop").lastModified();
+            return m > 0 ? String.valueOf(m) : "";
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** APK 安装路径：nativeLibraryDir|sourceDir（多开 fake-libs/重装检测）。 */
+    public static String apkPaths(Context ctx) {
+        try {
+            ApplicationInfo ai = ctx.getApplicationInfo();
+            return ai.nativeLibraryDir + "|" + ai.sourceDir;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** 输入设备指纹（InputDevice API，免权限、不依赖 /proc 可读性）——名/厂商/产品/源 排序后 hash。 */
+    public static String inputDevicesApi() {
+        try {
+            int[] ids = InputDevice.getDeviceIds();
+            if (ids == null || ids.length == 0) return "";
+            List<String> rows = new ArrayList<>();
+            for (int id : ids) {
+                InputDevice d = InputDevice.getDevice(id);
+                if (d == null) continue;
+                rows.add(safe(d.getName()) + "|" + d.getVendorId() + "|" + d.getProductId() + "|" + d.getSources());
+            }
+            if (rows.isEmpty()) return "";
+            Collections.sort(rows);
+            return hash(joinLines(rows));
+        } catch (Throwable t) {
+            return "";
         }
     }
 

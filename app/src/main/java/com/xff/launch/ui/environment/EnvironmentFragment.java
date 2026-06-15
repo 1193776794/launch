@@ -30,6 +30,8 @@ import com.xff.launch.detector.SideChannelDetector;
 import com.xff.launch.detector.ZygoteDetector;
 import com.xff.launch.detector.TamperDetector;
 import com.xff.launch.detector.BootloaderDetector;
+import com.xff.launch.detector.DeviceAuthenticityDetector;
+import com.xff.launch.detector.MultiInstanceDetector;
 import com.xff.launch.model.DetectionCategory;
 import com.xff.launch.model.DetectionGroup;
 import com.xff.launch.model.DetectionResult;
@@ -129,13 +131,16 @@ public class EnvironmentFragment extends Fragment {
         final String strTamper = getString(R.string.category_tamper);
         final String strBootloader = getString(R.string.category_bootloader);
         final String strNetwork = getString(R.string.category_network);
+        final String strAuthenticity = getString(R.string.category_authenticity);
+        final String strMultiInstance = getString(R.string.category_multi_instance);
 
         swipeRefresh.setRefreshing(true);
 
         executor.execute(() -> {
             DetectionResult result = performDetection(ctx,
                     strRoot, strHook, strEmulator, strDebug, strSideChannel,
-                    strReadlink, strZygote, strTamper, strBootloader, strNetwork);
+                    strReadlink, strZygote, strTamper, strBootloader, strNetwork,
+                    strAuthenticity, strMultiInstance);
 
             if (getActivity() != null && isAdded()) {
                 getActivity().runOnUiThread(() -> {
@@ -151,7 +156,8 @@ public class EnvironmentFragment extends Fragment {
     private DetectionResult performDetection(Context ctx,
             String strRoot, String strHook, String strEmulator, String strDebug,
             String strSideChannel, String strReadlink, String strZygote,
-            String strTamper, String strBootloader, String strNetwork) {
+            String strTamper, String strBootloader, String strNetwork,
+            String strAuthenticity, String strMultiInstance) {
         DetectionResult result = new DetectionResult();
         List<DetectionGroup> groups = new ArrayList<>();
 
@@ -254,6 +260,26 @@ public class EnvironmentFragment extends Fragment {
         BootloaderDetector bootloaderDetector = new BootloaderDetector(ctx);
         bootloaderGroup.setItems(bootloaderDetector.getAllDetections());
         groups.add(bootloaderGroup);
+
+        // Device Authenticity / Risk Signals (锁屏/电池/无障碍/TEE — JD field 2/5/15/14)
+        DetectionGroup authenticityGroup = new DetectionGroup(
+                strAuthenticity,
+                DetectionCategory.AUTHENTICITY,
+                R.drawable.ic_phone
+        );
+        DeviceAuthenticityDetector authenticityDetector = new DeviceAuthenticityDetector(ctx);
+        authenticityGroup.setItems(authenticityDetector.getAllDetections());
+        groups.add(authenticityGroup);
+
+        // Multi-instance / Sandbox Hijack (多开容器/fd路径劫持 — JD field 1)
+        DetectionGroup multiInstanceGroup = new DetectionGroup(
+                strMultiInstance,
+                DetectionCategory.MULTI_INSTANCE,
+                R.drawable.ic_readlink
+        );
+        MultiInstanceDetector multiInstanceDetector = new MultiInstanceDetector(ctx);
+        multiInstanceGroup.setItems(multiInstanceDetector.getAllDetections());
+        groups.add(multiInstanceGroup);
 
         result.setGroups(groups);
         result.calculateScore();

@@ -66,7 +66,8 @@ public class TamperDetector {
             "/sys/fs/selinux/enforce"
     };
 
-    private static final String[] SELINUX_PROPERTIES = {
+    // 注：这些是 VBMeta 完整性属性，非 SELinux 属性（原命名 SELINUX_PROPERTIES 有误，已更名）
+    private static final String[] VBMETA_PROPERTIES = {
             "ro.boot.vbmeta.digest"
     };
 
@@ -376,7 +377,7 @@ public class TamperDetector {
         }
 
         // Check vbmeta digest property
-        for (String prop : SELINUX_PROPERTIES) {
+        for (String prop : VBMETA_PROPERTIES) {
             try {
                 String val = nativeDetector.getSystemProperty(prop);
                 if (val != null && !val.isEmpty()) {
