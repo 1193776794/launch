@@ -1312,18 +1312,43 @@ MultiLayerResult HookDetector::detectMemoryHooks() {
 static std::string s_xposedMemDetails;
 
 bool HookDetector::checkXposedMemoryStrings() {
-    // 只用“注入特有”needle:框架/现代API 加载进被注入进程才有的类名,
-    // 且 launch app 自己源码不含(避免自命中 app 现有 path-based 检测的字符串)。
-    // 已核对 app 源码 0 出现:org.lsposed.lspd / XposedModuleInterface / ILSPInjectedModule。
+    // 只用“注入特有”needle:框架/现代API 加载进被注入进程才有的类名。app 自己的字符串字面量在
+    // 文件映射的 dex 串池里(本扫描只扫匿名/dalvik 区,跳过 file-backed),不会自命中;只有注入进
+    // 匿名内存的框架 dex / native 串才被扫到 → 可放心放框架类名。覆盖各 Xposed 变体 + hook 引擎。
     static const char* kNeedles[] = {
-        "org.lsposed.lspd",          // 框架 service 类(注入才有)
-        "XposedModuleInterface",     // 现代 libxposed API(注入才有)
-        "ILSPInjectedModule",        // 框架注入 service(注入才有)
-        "XposedModuleInterface$ModuleLoadedParam",
+        // —— LSPosed 框架(Zygisk/Riru)——
+        "org.lsposed.lspd",                        // 框架 service 类
         "org.lsposed.lspd.service",
-        "LspModuleClassLoader",            // 模块专用 classloader(注入才有)
-        "de.robv.android.xposed.XC_MethodHook",  // Xposed hook 回调基类
-        "LSPHooker_"                       // LSPlant 生成的 hook 桥类名前缀
+        "org.lsposed.lspd.core",                   // 框架核心
+        "org.lsposed.lspd.nativebridge",           // native 桥
+        "org.lsposed.lspd.hooker",                 // 内建 hooker
+        "LspModuleClassLoader",                    // 模块专用 classloader
+        "ILSPInjectedModule",                      // 框架注入 service
+        "LSPHooker_",                              // LSPlant 生成的 hook 桥类名前缀
+        // —— 现代 libxposed API ——
+        "XposedModuleInterface",
+        "XposedModuleInterface$ModuleLoadedParam",
+        "io.github.libxposed.api",                 // 新版 libxposed 接口
+        "io.github.libxposed.service",
+        // —— 经典 Xposed API(EdXposed/太极/VirtualXposed 都用)——
+        "de.robv.android.xposed.XposedBridge",
+        "de.robv.android.xposed.XposedHelpers",
+        "de.robv.android.xposed.XC_MethodHook",    // hook 回调基类
+        "de.robv.android.xposed.IXposedHookLoadPackage",
+        "de.robv.android.xposed.callbacks.XC_LoadPackage",
+        // —— EdXposed / Riru 系 ——
+        "com.elderdrivers.riru",                   // EdXposed riru 实现
+        "org.meowcat.edxposed",                    // EdXposed manager
+        // —— LSPatch(免 root 重打包注入)——
+        "org.lsposed.lspatch",
+        // —— 太极 / 免 root Xposed ——
+        "me.weishu.exp",                           // TaiChi exposed
+        "me.weishu.epic",                          // Epic hook 引擎
+        // —— native hook 引擎 ——
+        "com.swift.sandhook",                      // SandHook
+        "top.canyie.pine",                         // Pine
+        "lab.galaxy.yahfa",                        // YAHFA
+        "com.taobao.android.dexposed",             // Dexposed
     };
     std::ifstream maps("/proc/self/maps");
     if (!maps.is_open()) return false;
