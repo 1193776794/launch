@@ -2655,34 +2655,7 @@ public class HookDetector {
         } catch (Exception ignored) {
         }
 
-        // 检测 Frida 线程
-        try {
-            java.io.File taskDir = new java.io.File("/proc/self/task");
-            java.io.File[] tasks = taskDir.listFiles();
-            if (tasks != null) {
-                for (java.io.File task : tasks) {
-                    try {
-                        java.io.File commFile = new java.io.File(task, "comm");
-                        if (commFile.exists()) {
-                            java.io.BufferedReader reader = new java.io.BufferedReader(
-                                new java.io.FileReader(commFile));
-                            String threadName = reader.readLine();
-                            reader.close();
-
-                            if (threadName != null &&
-                                (threadName.contains("gmain") ||
-                                 threadName.contains("gdbus") ||
-                                 threadName.contains("gum-js-loop") ||
-                                 threadName.contains("pool-frida"))) {
-                                item.addDetectionDetail("🧵 Frida 线程", threadName,
-                                    "TID: " + task.getName() + "\n线程名: " + threadName,
-                                    DetectionLayer.NATIVE, "🔗");
-                            }
-                        }
-                    } catch (Exception ignored) {}
-                }
-            }
-        } catch (Exception ignored) {
-        }
+        // [去重] Frida 线程 comm 扫描已统一到 detectFridaThreads(它扫全表 FRIDA_THREAD_NAMES +
+        // TracerPid + D-Bus AUTH 协议探测,是专职且更强的实现),此处不再重复扫描。
     }
 }
