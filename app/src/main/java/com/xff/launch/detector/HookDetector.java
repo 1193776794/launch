@@ -1213,55 +1213,6 @@ public class HookDetector {
         return item;
     }
 
-    /**
-     * Detect SMAPS Memory Integrity - 高级内存取证技术
-     * 通过分析代码段的 Private_Dirty 来检测 Inline Hook
-     */
-    public DetectionItem detectSmapsHook() {
-        DetectionItem item = new DetectionItem("SMAPS 内存检测", "检测代码段篡改");
-
-        // SMAPS 检测只在 Native 层实现，使用 syscall 直接读取
-        boolean smapsResult = nativeDetector.checkSmapsIntegrity();
-        item.setLayerResult(DetectionLayer.SYSCALL, smapsResult);
-        item.setLayerResult(DetectionLayer.NATIVE, smapsResult);
-
-        if (smapsResult) {
-            item.setStatus(DetectionStatus.RISK);
-            item.setDetail("检测到代码段被修改 (Inline Hook)");
-
-            item.addDetectionDetail("🔬 SMAPS 分析",
-                    "代码段完整性检测",
-                    "分析 /proc/self/smaps 发现关键库的代码段 (r-xp) 存在 Private_Dirty 页\n\n" +
-                    "这意味着:\n" +
-                    "• 只读代码段被修改\n" +
-                    "• 触发了 Copy-on-Write\n" +
-                    "• 存在 Inline Hook\n\n" +
-                    "可能的注入源:\n" +
-                    "• Xposed/LSPosed\n" +
-                    "• Frida\n" +
-                    "• Zygisk 模块",
-                    DetectionLayer.SYSCALL,
-                    "🧬");
-
-            item.addDetectionDetail("📊 检测原理",
-                    "内存取证技术",
-                    "SMAPS (Shared Memory Area Stats) 提供了进程内存映射的详细统计信息\n\n" +
-                    "检测步骤:\n" +
-                    "1. 读取 /proc/self/smaps\n" +
-                    "2. 定位关键库 (libart.so/libc.so) 的代码段\n" +
-                    "3. 检查 Private_Dirty 字段\n" +
-                    "4. Private_Dirty > 0 → 代码被修改\n\n" +
-                    "优势: 几乎无法绕过，因为修改只读内存必然触发 COW",
-                    DetectionLayer.NATIVE,
-                    "📖");
-
-        } else {
-            item.setStatus(DetectionStatus.SAFE);
-            item.setDetail("未检测到代码篡改");
-        }
-
-        return item;
-    }
 
     /**
      * Get all hook detection items
@@ -1278,8 +1229,8 @@ public class HookDetector {
         items.add(detectFunctionInlineHooks());       // [XFF-A] 函数级 inline-hook(字节比对)
         items.add(detectAntiDBI());                   // [XFF-B] 反 DBI/模拟器探针
         items.add(detectZygisk());
-        items.add(detectSmapsHook());
-        items.add(detectMemoryIntegrity());
+        // detectSmapsHook / detectMemoryIntegrity 已去重:SMAPS 由 SideChannel.checkGotPltHooks 覆盖,
+        // 系统库完整性由 SideChannel.checkSystemLibIntegrity 覆盖(见项目去重整理)。
         items.add(detectAdvancedHookFrameworks());
         items.add(detectFridaThreads());
         return items;
@@ -1324,6 +1275,20 @@ public class HookDetector {
             if (vmosVal != null && !vmosVal.isEmpty()) {
                 javaDetected = true;
                 item.addDetectionDetail("🎮 VMOS Xposed", VMOS_XPOSED_PROP, "值: " + vmosVal, DetectionLayer.JAVA, "📱");
+            }
+        } catch (Exception ignored) {}
+
+        // [去重迁入·原 ZygoteDetector.checkNativeBridge] ro.dalvik.vm.native.bridge 值检测:
+        // 正常为 "0";若为 libhoudini(x86 二进制翻译/模拟器)或 libriruloader(Riru 注入)= 可疑。
+        try {
+            String nb = nativeDetector.getSystemProperty("ro.dalvik.vm.native.bridge");
+            if (nb != null && !nb.isEmpty() && !nb.equals("0")) {
+                String low = nb.toLowerCase();
+                if (low.contains("riru") || low.contains("houdini") || low.contains("ndk_translation")) {
+                    javaDetected = true;
+                    item.addDetectionDetail("🌉 Native Bridge", "ro.dalvik.vm.native.bridge",
+                            "值: " + nb + "(riru 注入 / houdini 模拟器翻译)", DetectionLayer.NATIVE, "⚠️");
+                }
             }
         } catch (Exception ignored) {}
 
@@ -1562,105 +1527,6 @@ public class HookDetector {
         }
     }
 
-    /**
-     * Detect memory integrity violations in system libraries
-     * Checks if libc, libart, and other critical SO files have been tampered with
-     */
-    public DetectionItem detectMemoryIntegrity() {
-        android.util.Log.d("HookDetector", "=== detectMemoryIntegrity() START ===");
-        DetectionItem item = new DetectionItem("内存完整性", "检测系统库字节码完整性");
-
-        boolean isViolated = false;
-        StringBuilder detailBuilder = new StringBuilder();
-
-        try {
-            // Check libc.so integrity
-            android.util.Log.d("HookDetector", "Checking libc.so integrity...");
-            boolean libcClean = nativeDetector.checkLibcIntegrity();
-            android.util.Log.d("HookDetector", "libc.so result: " + (libcClean ? "CLEAN" : "HOOKED"));
-
-            if (!libcClean) {
-                isViolated = true;
-                detailBuilder.append("• libc.so 被篡改\n");
-            }
-
-            // Check libart.so integrity
-            android.util.Log.d("HookDetector", "Checking libart.so integrity...");
-            boolean libartClean = nativeDetector.checkLibartIntegrity();
-            android.util.Log.d("HookDetector", "libart.so result: " + (libartClean ? "CLEAN" : "HOOKED"));
-
-            if (!libartClean) {
-                isViolated = true;
-                detailBuilder.append("• libart.so 被篡改\n");
-            }
-
-            // Check libandroid_runtime.so integrity
-            android.util.Log.d("HookDetector", "Checking libandroid_runtime.so integrity...");
-            boolean runtimeClean = nativeDetector.checkAndroidRuntimeIntegrity();
-            android.util.Log.d("HookDetector", "libandroid_runtime.so result: " + (runtimeClean ? "CLEAN" : "HOOKED"));
-
-            if (!runtimeClean) {
-                isViolated = true;
-                detailBuilder.append("• libandroid_runtime.so 被篡改\n");
-            }
-
-            // Check specific critical functions for inline hooks
-            String[][] criticalFunctions = {
-                {"libc.so", "open"},
-                {"libc.so", "openat"},
-                {"libc.so", "read"},
-                {"libc.so", "access"},
-                {"libc.so", "stat"}
-            };
-
-            int hookedFunctions = 0;
-            for (String[] funcInfo : criticalFunctions) {
-                String libName = funcInfo[0];
-                String funcName = funcInfo[1];
-
-                android.util.Log.d("HookDetector", "Checking function: " + libName + "::" + funcName);
-                boolean isHooked = nativeDetector.checkFunctionHook(libName, funcName);
-
-                if (isHooked) {
-                    hookedFunctions++;
-                    android.util.Log.w("HookDetector", "Function " + funcName + " is HOOKED!");
-                }
-            }
-
-            if (hookedFunctions > 0) {
-                isViolated = true;
-                detailBuilder.append("• 检测到 ").append(hookedFunctions).append(" 个函数被Hook\n");
-            }
-
-            // Set status based on results
-            if (isViolated) {
-                item.setStatus(DetectionStatus.RISK);
-                item.setLayerResult(DetectionLayer.NATIVE, true);
-
-                String detail = detailBuilder.toString();
-                if (detail.isEmpty()) {
-                    detail = "检测到内存篡改";
-                }
-                item.setDetail(detail);
-
-                android.util.Log.w("HookDetector", "!!! MEMORY INTEGRITY VIOLATION DETECTED !!!");
-                android.util.Log.w("HookDetector", detail);
-            } else {
-                item.setStatus(DetectionStatus.SAFE);
-                item.setLayerResult(DetectionLayer.NATIVE, false);
-                item.setDetail("系统库完整性正常");
-                android.util.Log.d("HookDetector", "Memory integrity check PASSED");
-            }
-
-        } catch (Exception e) {
-            android.util.Log.e("HookDetector", "Error in detectMemoryIntegrity", e);
-            item.setStatus(DetectionStatus.UNKNOWN);
-            item.setDetail("检测失败: " + e.getMessage());
-        }
-
-        android.util.Log.d("HookDetector", "=== detectMemoryIntegrity() END - Status: " + item.getStatus() + " ===");
-        return item;
-    }
 
     /**
      * Get detailed integrity report for all system libraries

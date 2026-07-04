@@ -27,7 +27,6 @@ import com.xff.launch.detector.NetworkDetector;
 import com.xff.launch.detector.ReadlinkDetector;
 import com.xff.launch.detector.RootDetector;
 import com.xff.launch.detector.SideChannelDetector;
-import com.xff.launch.detector.ZygoteDetector;
 import com.xff.launch.detector.TamperDetector;
 import com.xff.launch.detector.BootloaderDetector;
 import com.xff.launch.detector.DeviceAuthenticityDetector;
@@ -127,7 +126,6 @@ public class EnvironmentFragment extends Fragment {
         final String strDebug = getString(R.string.category_debug);
         final String strSideChannel = getString(R.string.category_side_channel);
         final String strReadlink = getString(R.string.category_readlink);
-        final String strZygote = getString(R.string.category_zygote);
         final String strTamper = getString(R.string.category_tamper);
         final String strBootloader = getString(R.string.category_bootloader);
         final String strNetwork = getString(R.string.category_network);
@@ -139,7 +137,7 @@ public class EnvironmentFragment extends Fragment {
         executor.execute(() -> {
             DetectionResult result = performDetection(ctx,
                     strRoot, strHook, strEmulator, strDebug, strSideChannel,
-                    strReadlink, strZygote, strTamper, strBootloader, strNetwork,
+                    strReadlink, strTamper, strBootloader, strNetwork,
                     strAuthenticity, strMultiInstance);
 
             if (getActivity() != null && isAdded()) {
@@ -155,7 +153,7 @@ public class EnvironmentFragment extends Fragment {
 
     private DetectionResult performDetection(Context ctx,
             String strRoot, String strHook, String strEmulator, String strDebug,
-            String strSideChannel, String strReadlink, String strZygote,
+            String strSideChannel, String strReadlink,
             String strTamper, String strBootloader, String strNetwork,
             String strAuthenticity, String strMultiInstance) {
         DetectionResult result = new DetectionResult();
@@ -231,15 +229,9 @@ public class EnvironmentFragment extends Fragment {
         readlinkGroup.setItems(readlinkDetector.getAllDetections());
         groups.add(readlinkGroup);
 
-        // Zygote Injection Detection Group
-        DetectionGroup zygoteGroup = new DetectionGroup(
-                strZygote,
-                DetectionCategory.ZYGOTE,
-                R.drawable.ic_zygote
-        );
-        ZygoteDetector zygoteDetector = new ZygoteDetector(ctx);
-        zygoteGroup.setItems(zygoteDetector.getAllDetections());
-        groups.add(zygoteGroup);
+        // [去重整理] ZYGOTE 分组已退役:ZygoteDetector 是 HookDetector/SideChannel/RootDetector 的旧
+        // 并行实现,14 项无一有独占能力(Zygisk/Riru/匿名可执行内存/内存完整性/库函数钩子/内存DEX
+        // 全部有更强等价实现;native.bridge 已迁入 HookDetector.detectAdvancedHookFrameworks)。
 
         // Tamper/Device Modification Detection Group
         DetectionGroup tamperGroup = new DetectionGroup(

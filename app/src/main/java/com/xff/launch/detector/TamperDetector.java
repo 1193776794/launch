@@ -80,7 +80,7 @@ public class TamperDetector {
         List<DetectionItem> items = new ArrayList<>();
         items.add(detectTamperTools());
         items.add(detectHostsTampering());
-        items.add(detectRwxpMemory());
+        // detectRwxpMemory 已去重:RWX/匿名可执行内存由 SideChannel.checkAnonymousRwxMemory(超集)覆盖。
         items.add(detectMountsChange());
         items.add(detectSystemIntegrity());
         return items;
