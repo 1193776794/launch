@@ -18,6 +18,15 @@
 #include <algorithm>
 #include <vector>
 #include <set>
+#include <sstream>
+#include <cstdint>
+#include <csignal>
+#include <csetjmp>
+#include <pthread.h>
+#include <elf.h>
+#include <link.h>
+#include <sys/wait.h>
+#include <poll.h>
 #include <linux/limits.h>
 #include <android/log.h>
 #include <sys/system_properties.h>
@@ -190,6 +199,618 @@ JNIEXPORT jstring JNICALL
 Java_com_xff_launch_detector_NativeDetector_getLSPosedDetails(JNIEnv *env, jobject thiz) {
     std::string details = HookDetector::getLSPosedDetails();
     return env->NewStringUTF(details.c_str());
+}
+
+// [XFF] 自读内存字节扫 Xposed 类名串(DetectEvilFrameworks 技术)
+JNIEXPORT jboolean JNICALL
+Java_com_xff_launch_detector_NativeDetector_checkXposedMemoryStringsNative(JNIEnv *env, jobject thiz) {
+    return HookDetector::checkXposedMemoryStrings();
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getXposedMemStringsDetails(JNIEnv *env, jobject thiz) {
+    std::string details = HookDetector::getXposedMemStringsDetails();
+    return env->NewStringUTF(details.c_str());
+}
+
+// [XFF-T2/T3] 模块注入痕迹:外来 dex/apk 映射 + 外来 fd 报告
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getModuleInjectionReport(JNIEnv *env, jobject thiz,
+                                                                     jstring hostPkg, jstring hostApkDir) {
+    const char *pkg = hostPkg ? env->GetStringUTFChars(hostPkg, nullptr) : nullptr;
+    const char *dir = hostApkDir ? env->GetStringUTFChars(hostApkDir, nullptr) : nullptr;
+    std::string r = HookDetector::getModuleInjectionReport(pkg ? pkg : "", dir ? dir : "");
+    if (pkg) env->ReleaseStringUTFChars(hostPkg, pkg);
+    if (dir) env->ReleaseStringUTFChars(hostApkDir, dir);
+    return env->NewStringUTF(r.c_str());
+}
+
+// [XFF-T5] Hook 引擎 .so dlopen(RTLD_NOLOAD) 探测报告
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getArtHookLibReport(JNIEnv *env, jobject thiz) {
+    std::string r = HookDetector::getArtHookLibReport();
+    return env->NewStringUTF(r.c_str());
+}
+
+// ================= [XFF-T6] LSPlant hook 点 · ArtMethod 检测 =================
+// jmethodID 在 ART 上就是 ArtMethod*。ArtMethod 头部布局跨 API 24-35 稳定:
+//   +0  GcRoot<Class> declaring_class_ (4B, 压缩引用)
+//   +4  uint32_t      access_flags_
+// 尾部 entry_point_from_quick_compiled_code_ 偏移随版本变 → 不写死,扫头 0x30 字节里每个
+// 指针槽,看谁落在"匿名可执行区"。正常方法入口只会落在 .oat(文件映射)/libart 解释器桥
+// (文件映射)/JIT code-cache(/memfd:jit-cache 或 ashmem,有名字→非匿名)。只有 LSPlant/
+// Frida 的 trampoline 在真正匿名可执行内存里 → 命中即被 hook。全程只读 ArtMethod 自身
+// (合法可读、且先用 maps 区间校验 [am, am+0x38) 可读才读),只拿槽位值和 maps 区间比较、
+// 绝不解引用槽位值 → 不可能崩。
+struct XffHookRegion { uintptr_t start, end; bool exec, read, anon; };
+
+static std::vector<XffHookRegion> xffParseSelfMaps() {
+    std::vector<XffHookRegion> regs;
+    std::string maps = syscall_read_file_full("/proc/self/maps");
+    std::stringstream ss(maps);
+    std::string line;
+    while (std::getline(ss, line)) {
+        unsigned long s = 0, e = 0;
+        char perms[8] = {0};
+        char path[512] = {0};
+        int n = sscanf(line.c_str(), "%lx-%lx %7s %*x %*x:%*x %*u %511[^\n]",
+                       &s, &e, perms, path);
+        if (n < 3 || e <= s) continue;
+        XffHookRegion r;
+        r.start = (uintptr_t)s;
+        r.end = (uintptr_t)e;
+        r.read = perms[0] == 'r';
+        r.exec = perms[2] == 'x';
+        std::string p = (n >= 4) ? std::string(path) : std::string();
+        r.anon = p.empty() || p[0] == '[';
+        regs.push_back(r);
+    }
+    return regs;
+}
+
+// Android 11+ 用指针 tag(ARM64 TBI / heap tagging):native 堆指针顶字节带 tag,硬件解引用时忽略,
+// 但软件层与 /proc/self/maps(未 tag)比较前必须抹掉顶字节。x86_64 无 tag,顶字节本就是 0 → 无害。
+static inline uintptr_t xffUntag(uintptr_t p) { return p & 0x00FFFFFFFFFFFFFFULL; }
+
+static bool xffAddrReadable(const std::vector<XffHookRegion> &regs, uintptr_t p, size_t len) {
+    p = xffUntag(p);
+    for (const auto &r : regs) {
+        if (p >= r.start && p + len <= r.end) return r.read;
+    }
+    return false;
+}
+
+static bool xffAddrAnonExec(const std::vector<XffHookRegion> &regs, uintptr_t p) {
+    p = xffUntag(p);
+    if (p < 0x1000) return false;
+    for (const auto &r : regs) {
+        if (p >= r.start && p < r.end) return r.exec && r.anon;
+    }
+    return false;
+}
+
+// 检查单个 ArtMethod(=jmethodID)是否被 LSPlant/Frida hook:entry_point_from_quick_compiled_code_
+// 被换成匿名可执行内存里的 trampoline。不写死 entrypoint 偏移(随版本变),扫 ArtMethod 头 0x38 字节
+// 里每个指针槽,看谁落在"匿名可执行区"。正常方法入口只在 .oat/libart/JIT-cache(memfd 具名);
+// 落在匿名可执行内存 = 被 inline 换头。全程先 maps 校验可读才读、只比较不解引用槽值 → 不崩。
+static bool xffMethodHooked(const std::vector<XffHookRegion> &regs, jmethodID mid, uintptr_t *hitOut) {
+    if (mid == nullptr) return false;
+    uintptr_t am = reinterpret_cast<uintptr_t>(mid);
+    if (!xffAddrReadable(regs, am, 0x38)) return false;
+    for (size_t off = 8; off <= 0x30; off += sizeof(void *)) {
+        uintptr_t slot = *reinterpret_cast<const uintptr_t *>(am + off);
+        if (xffAddrAnonExec(regs, slot)) {
+            if (hitOut) *hitOut = slot;
+            return true;
+        }
+    }
+    return false;
+}
+
+// [XFF-T6] LSPlant 方法级 hook 检测:反射枚举一批"常被 anti-detection / 设备伪装模块 hook"的框架类
+// + 本 app 自身检测类的**全部方法**,逐个查 ArtMethod entrypoint 是否落在匿名可执行 trampoline。
+// 现代 LSPosed 框架 loader 不进 class_loaders_(枚举抓不到),但它把 hook 打在**已注册的框架/app
+// 方法**上 → 这些方法的 ArtMethod 就在类表里,entrypoint 被换 → 这是"hooks installed"绕不过的痕迹。
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getHookedMethodReport(JNIEnv *env, jobject thiz) {
+    std::vector<XffHookRegion> regs = xffParseSelfMaps();
+    std::string report;
+
+    // 常被设备伪装 / 反检测模块 hook 的类 + 本 app 自身检测类(模块可能 hook 它来伪造检测结果)
+    static const char *kClasses[] = {
+        "android/os/SystemProperties", "android/os/Build", "android/os/Build$VERSION",
+        "android/provider/Settings$Secure", "android/provider/Settings$System",
+        "android/provider/Settings$Global",
+        "android/telephony/TelephonyManager", "android/telephony/SubscriptionManager",
+        "android/app/ApplicationPackageManager", "android/content/pm/PackageManager",
+        "android/app/ActivityManager", "android/content/ContentResolver",
+        "java/io/File", "java/lang/Runtime", "java/lang/System", "java/lang/Class",
+        "dalvik/system/BaseDexClassLoader", "dalvik/system/PathClassLoader",
+        "java/net/NetworkInterface", "android/net/wifi/WifiManager",
+        "android/net/wifi/WifiInfo", "android/os/Debug",
+        "android/hardware/SensorManager", "android/bluetooth/BluetoothAdapter",
+        "android/webkit/WebSettings", "android/webkit/WebView",
+        "android/media/MediaDrm", "android/app/ActivityThread",
+        // 本 app 自身检测类(若模块 hook 它伪造结果,这里能抓到)
+        "com/xff/launch/detector/NativeDetector", "com/xff/launch/detector/HookDetector",
+        "com/xff/launch/detector/RootDetector", "com/xff/launch/detector/EmulatorDetector",
+    };
+
+    jclass clsClass = env->FindClass("java/lang/Class");
+    jmethodID midGetMethods = clsClass ? env->GetMethodID(
+            clsClass, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;") : nullptr;
+    jclass methodClass = env->FindClass("java/lang/reflect/Method");
+    jmethodID midGetName = methodClass ? env->GetMethodID(
+            methodClass, "getName", "()Ljava/lang/String;") : nullptr;
+    if (!midGetMethods) { env->ExceptionClear(); return env->NewStringUTF("UNSUPPORTED:no-reflect\n"); }
+
+    int methodsScanned = 0, hits = 0;
+    for (const char *cn : kClasses) {
+        jclass c = env->FindClass(cn);
+        if (c == nullptr) { env->ExceptionClear(); continue; }
+        jobject arr = env->CallObjectMethod(c, midGetMethods);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(c); continue; }
+        if (arr != nullptr) {
+            jsize nm = env->GetArrayLength(reinterpret_cast<jobjectArray>(arr));
+            for (jsize i = 0; i < nm; i++) {
+                jobject m = env->GetObjectArrayElement(reinterpret_cast<jobjectArray>(arr), i);
+                if (m == nullptr) { env->ExceptionClear(); continue; }
+                jmethodID mid = env->FromReflectedMethod(m);
+                methodsScanned++;
+                uintptr_t hit = 0;
+                if (xffMethodHooked(regs, mid, &hit)) {
+                    hits++;
+                    if (hits <= 30) {
+                        std::string mname = "?";
+                        if (midGetName) {
+                            jstring ns = reinterpret_cast<jstring>(env->CallObjectMethod(m, midGetName));
+                            if (ns) {
+                                const char *nc = env->GetStringUTFChars(ns, nullptr);
+                                if (nc) { mname = nc; env->ReleaseStringUTFChars(ns, nc); }
+                                env->DeleteLocalRef(ns);
+                            } else env->ExceptionClear();
+                        }
+                        char b[40];
+                        snprintf(b, sizeof(b), " [entry=0x%lx]", (unsigned long) hit);
+                        report += "HOOKED=" + std::string(cn) + "." + mname + b + "\n";
+                        __android_log_print(ANDROID_LOG_WARN, "HookDetector",
+                                            "[T6] hooked method: %s.%s", cn, mname.c_str());
+                    }
+                }
+                env->DeleteLocalRef(m);
+            }
+            env->DeleteLocalRef(arr);
+        }
+        env->DeleteLocalRef(c);
+    }
+    if (clsClass) env->DeleteLocalRef(clsClass);
+    if (methodClass) env->DeleteLocalRef(methodClass);
+
+    // 附加:匿名可执行区扫描 —— LSPlant 用自带分配器 mmap 出可执行页放 trampoline(带守护页),
+    // 这些区**完全无名**(空路径)。现代 ART 的合法可执行码要么 file-backed(.oat/.so)、要么
+    // memfd(JIT)、要么具名 [anon:...];完全空路径的 exec 区 = 注入的 trampoline / InMemoryDex
+    // 框架编译码。这抓的是 hook 引擎的代码本体,不依赖"猜中被 hook 的方法"。
+    int anonExec = 0;
+    {
+        std::string maps = syscall_read_file_full("/proc/self/maps");
+        std::stringstream ms(maps);
+        std::string ln;
+        while (std::getline(ms, ln)) {
+            unsigned long s = 0, e = 0;
+            char perms[8] = {0};
+            char pth[512] = {0};
+            int n = sscanf(ln.c_str(), "%lx-%lx %7s %*x %*x:%*x %*u %511[^\n]", &s, &e, perms, pth);
+            if (n < 3 || perms[2] != 'x' || e <= s) continue;      // 必须可执行
+            std::string p = (n >= 4) ? std::string(pth) : std::string();
+            if (!p.empty()) continue;                              // 只认完全无名的 exec 区
+            anonExec++;
+            if (anonExec <= 20) {
+                char b[64];
+                snprintf(b, sizeof(b), "ANON_EXEC=0x%lx-0x%lx %s\n", s, e, perms);
+                report += b;
+                __android_log_print(ANDROID_LOG_WARN, "HookDetector",
+                                    "[T6] anon exec region (injected code): 0x%lx-0x%lx %s", s, e, perms);
+            }
+        }
+    }
+
+    __android_log_print(ANDROID_LOG_DEBUG, "HookDetector",
+                        "[T6] methodsScanned=%d hookHits=%d anonExecRegions=%d",
+                        methodsScanned, hits, anonExec);
+    if (report.empty()) report = "CLEAN\n";
+    return env->NewStringUTF(report.c_str());
+}
+
+// ============ [XFF-T5b] 真·ClassLinker::VisitClassLoaders 旁支 ClassLoader 枚举 ============
+// 通过 libart 导出符号 VisitClassLoaders 遍历进程内*所有* ClassLoader —— 包括 Java 反射父链
+// 看不到的旁支:LSPosed 框架 InMemoryDex loader、LspModuleClassLoader。
+// ClassLinker* 获取链:JNIEnv→GetJavaVM 得 JavaVMExt → runtime_(+0x8,跨版本稳定)→
+//   Runtime.class_linker_(偏移随版本变)。不硬编码偏移表,改用"每线程 SIGSEGV 守护 +
+//   ClassLoader 描述符判别"的自校准扫描:扫 Runtime 前 0x400 字节,哪个偏移让 VisitClassLoaders
+//   枚举出的对象描述符全部含 "ClassLoader" 且不崩,就是 class_linker_。
+// 安全性:ART 自身用 SIGSEGV 做隐式空指针检查 → 处理器只在本探测线程+守护窗口内 longjmp,
+//   其它线程的 fault 一律链回 ART 原处理器,不破坏 ART。错误偏移只在本线程触发 fault→被捕获→
+//   换下一个,绝不外泄崩溃。残留风险:遍历期间 GC 移动对象的窄竞态(一次性扫描,概率极低)。
+typedef void (*XffVisitClassLoaders_t)(void *class_linker, void *visitor);
+typedef void (*XffVisitClasses_t)(void *class_linker, void *visitor);
+typedef const char *(*XffGetDescriptor_t)(void *klass, std::string *storage);
+
+static XffVisitClassLoaders_t g_xffVisitCL = nullptr;
+static XffVisitClasses_t      g_xffVisitClasses = nullptr;
+static XffGetDescriptor_t     g_xffGetDesc = nullptr;
+static std::vector<XffHookRegion> g_xffVclRegs;
+
+static int         g_xffVclMode;    // 0=trial(校准), 1=collect
+static int         g_xffVclCount, g_xffVclGood, g_xffVclBad, g_xffVclInMem;
+static std::string g_xffVclReport;
+
+// VisitClasses 用:枚举*已加载的类*找框架类描述符(比枚举 loader 可靠 —— 现代 LSPosed 的框架
+// loader 不进 class_loaders_,但它定义的框架类必在类表里)。early-exit + 上限防超长遍历。
+static int         g_xffClsCount;
+static int         g_xffClsHits;
+static std::string g_xffClsReport;
+
+static sigjmp_buf            g_xffVclJb;
+static volatile sig_atomic_t g_xffVclGuard = 0;
+
+static pthread_t g_xffVclTid;
+
+// 守护处理器【仅在 fork 出的子进程里安装】。守护窗口内本线程的任何致命信号(SEGV/BUS,以及
+// 错误偏移把 libart 带进 CHECK/abort 的 SIGABRT/ILL 等)都 siglongjmp 回扫描循环换下一个;窗口外
+// 的致命信号直接 _exit —— 子进程一次性、可弃,父进程读到空 pipe 记 child-crashed。主进程从不安装
+// 此处理器,故不会打断 ART 的隐式 SIGSEGV 空指针检查、不会死锁主 app。
+static void xffVclSegv(int sig, siginfo_t *si, void *uc) {
+    (void) sig; (void) si; (void) uc;
+    if (g_xffVclGuard && pthread_equal(pthread_self(), g_xffVclTid)) {
+        siglongjmp(g_xffVclJb, 1);
+    }
+    _exit(42);
+}
+
+static bool xffVclReadable(void *p, size_t len) {
+    return p && xffAddrReadable(g_xffVclRegs, (uintptr_t) p, len);
+}
+
+// 取 mirror::Object 的 klass_(offset 0, 32-bit 压缩引用;Android heap 低 4G → 零扩展即指针)
+static void *xffVclKlass(void *obj) {
+    if (!xffVclReadable(obj, 4)) return nullptr;
+    uint32_t ref = *reinterpret_cast<uint32_t *>(obj);
+    return reinterpret_cast<void *>((uintptr_t) ref);
+}
+
+static void xffVclNoop() {}
+
+// vtable[2] = 本函数,匹配 ClassLoaderVisitor::Visit(ObjPtr<ClassLoader>) 的 ABI:x0=this, x1=loader
+static void xffVclOnLoader(void *self, void *loader) {
+    (void) self;
+    if (g_xffVclCount > 4000) siglongjmp(g_xffVclJb, 2);   // 防错误偏移下的超长循环
+    if (loader == nullptr) return;                          // 被 GC 的弱根,中性跳过
+    g_xffVclCount++;
+    void *klass = xffVclKlass(loader);
+    if (!klass || !xffVclReadable(klass, 8)) { g_xffVclBad++; return; }
+    std::string storage;
+    const char *d = g_xffGetDesc(klass, &storage);         // 垃圾 klass→读到非法内存→本线程 fault→守护捕获
+    std::string desc = d ? std::string(d) : storage;
+    if (desc.find("ClassLoader") != std::string::npos) {
+        g_xffVclGood++;
+        if (g_xffVclMode == 1) {
+            if (desc.find("InMemoryDexClassLoader") != std::string::npos) g_xffVclInMem++;
+            std::string low = desc;
+            std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+            if (low.find("lsposed") != std::string::npos ||
+                low.find("xposed") != std::string::npos ||
+                desc.find("LspModuleClassLoader") != std::string::npos) {
+                g_xffVclReport += "VCL_FRAMEWORK=" + desc + "\n";
+            }
+        }
+    } else {
+        g_xffVclBad++;
+    }
+}
+
+static void *g_xffVclVtbl[3] = {
+        (void *) xffVclNoop,       // ~ClassLoaderVisitor complete (D1) —— 不会在 Visit 中被调
+        (void *) xffVclNoop,       // ~ClassLoaderVisitor deleting (D0)
+        (void *) xffVclOnLoader,   // Visit
+};
+struct XffVclVisitor { void *vptr; };
+
+// ClassVisitor::operator()(ObjPtr<Class>) → bool(true=继续遍历)。x0=this, x1=klass, 返回值在 x0。
+// 匹配框架类描述符即命中;命中够多或超上限就返回 false 提前结束(类表可能上十万,防超时)。
+static bool xffClsOnClass(void *self, void *klass) {
+    (void) self;
+    if (++g_xffClsCount > 400000) return false;   // 上限保护
+    if (!xffVclReadable(klass, 8)) return true;
+    std::string storage;
+    const char *d = g_xffGetDesc(klass, &storage);
+    std::string desc = d ? std::string(d) : storage;
+    // 框架/模块类描述符(Lde/robv/... 经典 Xposed API,Lorg/lsposed/... LSPosed 框架)
+    if (desc.rfind("Lde/robv/android/xposed", 0) == 0 ||
+        desc.rfind("Lorg/lsposed/", 0) == 0 ||
+        desc.rfind("Lio/github/libxposed", 0) == 0 ||
+        desc.find("LspModuleClassLoader") != std::string::npos) {
+        g_xffClsHits++;
+        if (g_xffClsHits <= 12) g_xffClsReport += "VCL_CLASS=" + desc + "\n";
+        if (g_xffClsHits >= 12) return false;   // 够证明了,停
+    }
+    return true;
+}
+
+static void *g_xffClsVtbl[3] = {
+        (void *) xffVclNoop,        // ~ClassVisitor complete
+        (void *) xffVclNoop,        // ~ClassVisitor deleting
+        (void *) xffClsOnClass,     // operator()
+};
+struct XffClsVisitor { void *vptr; };
+
+// 从 /proc/self/maps 定位模块加载基址 + 磁盘路径(取最低映射地址 = ELF 头所在页)。
+// Android 10+ libart 在 ART APEX 独立 linker namespace,dlopen(RTLD_NOLOAD) 看不到,
+// 故绕过 linker 直接从 maps 拿基址、从磁盘 ELF 解析符号。
+static bool xffFindModule(const char *soname, uintptr_t *base, std::string *path) {
+    std::string maps = syscall_read_file_full("/proc/self/maps");
+    std::stringstream ss(maps);
+    std::string line;
+    uintptr_t lo = 0;
+    std::string p;
+    while (std::getline(ss, line)) {
+        if (line.find(soname) == std::string::npos) continue;
+        size_t slash = line.find('/');
+        if (slash == std::string::npos) continue;
+        std::string fp = line.substr(slash);
+        size_t del = fp.find(" (deleted)");
+        if (del != std::string::npos) fp = fp.substr(0, del);
+        while (!fp.empty() && (fp.back() == '\n' || fp.back() == ' ' || fp.back() == '\r'))
+            fp.pop_back();
+        // basename 精确匹配,排除 libartbase.so / libart-compiler.so 等
+        size_t bslash = fp.rfind('/');
+        std::string bn = (bslash == std::string::npos) ? fp : fp.substr(bslash + 1);
+        if (bn != soname) continue;
+        unsigned long s = 0, e = 0;
+        if (sscanf(line.c_str(), "%lx-%lx", &s, &e) < 2) continue;
+        if (lo == 0 || (uintptr_t) s < lo) lo = (uintptr_t) s;
+        p = fp;
+    }
+    if (lo == 0) return false;
+    *base = lo;
+    *path = p;
+    return true;
+}
+
+// 从磁盘 ELF 经 program header → PT_DYNAMIC → DT_SYMTAB/DT_STRTAB 解析动态符号
+//(与 nm -D 同路径,不依赖 section headers —— apex libart 已裁掉 section headers)。
+// 返回符号运行时地址 = base + st_value(PIE 首 PT_LOAD p_vaddr=0)。
+static uintptr_t xffResolveInModule(uintptr_t base, const std::string &path, const char *sym) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) < 0 || (size_t) st.st_size < sizeof(ElfW(Ehdr))) { close(fd); return 0; }
+    size_t sz = (size_t) st.st_size;
+    void *map = mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) return 0;
+
+    uintptr_t result = 0;
+    const uint8_t *p = (const uint8_t *) map;
+    const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *) p;
+    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) == 0 && eh->e_phoff != 0 && eh->e_phnum > 0 &&
+        eh->e_phoff + (size_t) eh->e_phnum * sizeof(ElfW(Phdr)) <= sz) {
+        const ElfW(Phdr) *ph = (const ElfW(Phdr) *) (p + eh->e_phoff);
+        const ElfW(Phdr) *dyn = nullptr;
+        for (int i = 0; i < eh->e_phnum; i++) {
+            if (ph[i].p_type == PT_DYNAMIC) { dyn = &ph[i]; break; }
+        }
+        // vaddr → 文件偏移(用 PT_LOAD 段换算)
+        auto v2off = [&](uintptr_t vaddr) -> size_t {
+            for (int i = 0; i < eh->e_phnum; i++) {
+                if (ph[i].p_type == PT_LOAD && vaddr >= ph[i].p_vaddr &&
+                    vaddr < ph[i].p_vaddr + ph[i].p_filesz) {
+                    return (size_t) (ph[i].p_offset + (vaddr - ph[i].p_vaddr));
+                }
+            }
+            return (size_t) -1;
+        };
+        if (dyn && dyn->p_offset + dyn->p_filesz <= sz) {
+            const ElfW(Dyn) *d = (const ElfW(Dyn) *) (p + dyn->p_offset);
+            uintptr_t symtabV = 0, strtabV = 0;
+            size_t maxDyn = dyn->p_filesz / sizeof(ElfW(Dyn));
+            for (size_t i = 0; i < maxDyn && d[i].d_tag != DT_NULL; i++) {
+                if (d[i].d_tag == DT_SYMTAB) symtabV = (uintptr_t) d[i].d_un.d_ptr;
+                else if (d[i].d_tag == DT_STRTAB) strtabV = (uintptr_t) d[i].d_un.d_ptr;
+            }
+            if (symtabV && strtabV && strtabV > symtabV) {
+                size_t symOff = v2off(symtabV), strOff = v2off(strtabV);
+                if (symOff != (size_t) -1 && strOff != (size_t) -1 && strOff < sz) {
+                    // .dynsym 紧邻 .dynstr → 符号数 = (strtab - symtab)/sizeof(Sym)
+                    size_t nsym = (strtabV - symtabV) / sizeof(ElfW(Sym));
+                    const ElfW(Sym) *symtab = (const ElfW(Sym) *) (p + symOff);
+                    const char *strtab = (const char *) (p + strOff);
+                    for (size_t i = 0; i < nsym; i++) {
+                        if (symtab[i].st_value == 0) continue;
+                        if (strOff + symtab[i].st_name >= sz) continue;
+                        if (strcmp(strtab + symtab[i].st_name, sym) == 0) {
+                            result = base + (uintptr_t) symtab[i].st_value;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    munmap(map, sz);
+    return result;
+}
+
+// 【子进程·全部在这里做】危险的 ClassLinker 枚举**只能**在 fork 出的一次性子进程里做:
+//   ① 校准 class_linker_ 偏移时,错误偏移会把 libart 带进 CHECK/abort(SIGABRT);
+//   ② 即便偏移正确,在活 runtime 上遍历类表/GetDescriptor 也会触发 ART 正常的隐式 SIGSEGV
+//      (read barrier 等),若在主进程 longjmp 打断它 → ART 内部锁不释放 → 整个 app 死锁转圈。
+// 所以主进程绝不碰活 runtime、绝不装信号守护。子进程读 COW 内存,崩/卡都只影响子进程,
+// 父进程 4s 超时杀掉。缺点:fork 后弱引用(class_loaders_ 存 GcRoot 弱根)部分解码不出 → 枚举
+// 偏少;但现代 LSPosed 的框架 loader 本就不注册进 class_loaders_,活进程也照样枚举不到,
+// 故这点损失对 LSPosed 检测无实质影响,换来的是**绝不卡死主 app**。
+static std::string xffVclChildRun(void *runtime) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = xffVclSegv;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    const int sigs[] = {SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP, SIGSYS};
+    for (int s : sigs) sigaction(s, &sa, nullptr);
+
+    g_xffVclTid = pthread_self();
+    g_xffVclGuard = 1;
+
+    // ① 自校准 class_linker_ 偏移
+    void *classLinker = nullptr;
+    for (size_t off = 0; off <= 0x2000 && classLinker == nullptr; off += sizeof(void *)) {
+        void *cand = *reinterpret_cast<void **>((char *) runtime + off);
+        if (!xffVclReadable(cand, 8)) continue;
+        g_xffVclMode = 0;
+        g_xffVclCount = g_xffVclGood = g_xffVclBad = 0;
+        XffVclVisitor v;
+        v.vptr = g_xffVclVtbl;
+        if (sigsetjmp(g_xffVclJb, 1) == 0) {
+            g_xffVisitCL(cand, &v);
+            if (g_xffVclGood >= 5 && g_xffVclGood >= g_xffVclBad * 5 && g_xffVclCount <= 3000) {
+                classLinker = cand;
+            }
+        }
+    }
+    if (classLinker == nullptr) {
+        g_xffVclGuard = 0;
+        return "UNSUPPORTED:offset-not-found\n";
+    }
+
+    // ② 枚举 ClassLoader
+    g_xffVclMode = 1;
+    g_xffVclCount = g_xffVclGood = g_xffVclBad = g_xffVclInMem = 0;
+    g_xffVclReport.clear();
+    XffVclVisitor v;
+    v.vptr = g_xffVclVtbl;
+    if (sigsetjmp(g_xffVclJb, 1) == 0) {
+        g_xffVisitCL(classLinker, &v);
+    }
+
+    // ③ 枚举已加载类找框架类描述符(Lorg/lsposed/、Lde/robv/ 等)
+    g_xffClsCount = g_xffClsHits = 0;
+    g_xffClsReport.clear();
+    if (g_xffVisitClasses) {
+        XffClsVisitor cv;
+        cv.vptr = g_xffClsVtbl;
+        if (sigsetjmp(g_xffVclJb, 1) == 0) {
+            g_xffVisitClasses(classLinker, &cv);
+        }
+    }
+    g_xffVclGuard = 0;
+
+    std::string result = "VCL_TOTAL=" + std::to_string(g_xffVclGood) + "\n";
+    result += "VCL_INMEMORY=" + std::to_string(g_xffVclInMem) + "\n";
+    result += "VCL_CLASSHITS=" + std::to_string(g_xffClsHits) + "\n";
+    result += g_xffVclReport;
+    result += g_xffClsReport;
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getVisitClassLoadersReport(JNIEnv *env, jobject thiz) {
+    // Android 10+ libart 在 ART APEX 独立 namespace,dlopen 看不到 → 从 maps+磁盘 ELF 解析符号
+    uintptr_t artBase = 0;
+    std::string artPath;
+    if (!xffFindModule("libart.so", &artBase, &artPath))
+        return env->NewStringUTF("UNSUPPORTED:no-libart\n");
+
+    // VisitClassLoaders:const / 非 const 两种签名
+    static const char *kVisitCands[] = {
+            "_ZNK3art11ClassLinker17VisitClassLoadersEPNS_18ClassLoaderVisitorE",
+            "_ZN3art11ClassLinker17VisitClassLoadersEPNS_18ClassLoaderVisitorE",
+    };
+    // GetDescriptor(std::string*):std::__1 替换索引 NS2_/NS3_ 因工具链而异,多候选兜底
+    static const char *kDescCands[] = {
+            "_ZN3art6mirror5Class13GetDescriptorEPNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE",
+            "_ZN3art6mirror5Class13GetDescriptorEPNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEE",
+            "_ZN3art6mirror5Class13GetDescriptorEPNSt3__112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE",
+    };
+    for (const char *s : kVisitCands) {
+        g_xffVisitCL = (XffVisitClassLoaders_t) xffResolveInModule(artBase, artPath, s);
+        if (g_xffVisitCL) break;
+    }
+    // VisitClasses(可选):枚举已加载类找框架类描述符
+    g_xffVisitClasses = (XffVisitClasses_t) xffResolveInModule(
+            artBase, artPath, "_ZN3art11ClassLinker12VisitClassesEPNS_12ClassVisitorE");
+    for (const char *s : kDescCands) {
+        g_xffGetDesc = (XffGetDescriptor_t) xffResolveInModule(artBase, artPath, s);
+        if (g_xffGetDesc) break;
+    }
+    if (!g_xffVisitCL || !g_xffGetDesc)
+        return env->NewStringUTF("UNSUPPORTED:no-symbol\n");
+
+    JavaVM *vm = nullptr;
+    if (env->GetJavaVM(&vm) != 0 || !vm)
+        return env->NewStringUTF("UNSUPPORTED:no-vm\n");
+
+    g_xffVclRegs = xffParseSelfMaps();
+    // JavaVMExt.runtime_ 通常在 +sizeof(void*)(JavaVM 仅一个 functions 指针,JavaVMExt 首成员即
+    // runtime_);个别版本布局有变,故 +0x8 / +0x10 都试,取首个 maps-可读者。
+    void *runtime = nullptr;
+    for (size_t roff = sizeof(void *); roff <= 2 * sizeof(void *); roff += sizeof(void *)) {
+        void *cand = *reinterpret_cast<void **>((char *) vm + roff);
+        if (runtime == nullptr && xffVclReadable(cand, 8)) runtime = cand;
+    }
+    if (!runtime)
+        return env->NewStringUTF("UNSUPPORTED:bad-runtime\n");
+    runtime = (void *) xffUntag((uintptr_t) runtime);   // 抹 tag,后续算术/解引用用规范地址
+
+    // fork 子进程做危险的暴力校准+枚举:错误偏移把 libart 带崩(SEGV/abort)只死子进程,
+    // 主 app 走 COW 不受影响。子进程读的是 fork 那一刻复制的内存(class_loaders_ 链完整可遍历)。
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
+        return env->NewStringUTF("UNSUPPORTED:no-pipe\n");
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return env->NewStringUTF("UNSUPPORTED:no-fork\n");
+    }
+
+    if (pid == 0) {
+        // ---- 子进程:校准 + 全部枚举,回传完整报告 ----
+        close(pipefd[0]);
+        std::string rep = xffVclChildRun(runtime);
+        size_t w = 0;
+        while (w < rep.size()) {
+            ssize_t k = write(pipefd[1], rep.data() + w, rep.size() - w);
+            if (k <= 0) break;
+            w += (size_t) k;
+        }
+        close(pipefd[1]);
+        _exit(0);
+    }
+
+    // ---- 父进程:只读报告,绝不碰活 runtime、绝不装信号守护 → 永不卡死主 app ----
+    close(pipefd[1]);
+    std::string out;
+    struct pollfd pfd;
+    pfd.fd = pipefd[0];
+    pfd.events = POLLIN;
+    bool timedout = false;
+    if (poll(&pfd, 1, 4000) > 0) {   // 子进程若死锁/慢,最多等 4s 后杀掉,父 app 不阻塞
+        char buf[4096];
+        ssize_t n;
+        while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+            out.append(buf, (size_t) n);
+            if (out.size() > 65536) break;
+        }
+    } else {
+        timedout = true;
+    }
+    close(pipefd[0]);
+    if (timedout) kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+
+    if (out.empty()) out = "UNSUPPORTED:child-crashed\n";
+    __android_log_print(ANDROID_LOG_DEBUG, "HookDetector", "[T5b] result: %s", out.c_str());
+    return env->NewStringUTF(out.c_str());
 }
 
 // Additional LSPosed detection JNI methods

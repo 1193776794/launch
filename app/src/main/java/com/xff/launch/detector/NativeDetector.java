@@ -48,6 +48,26 @@ public class NativeDetector {
     public native boolean checkLSPosedSyscall();
     public native String getLSPosedDetails();
 
+    // [XFF] 自读内存字节扫 Xposed/LSPosed 类名串(DetectEvilFrameworks 技术)
+    public native boolean checkXposedMemoryStringsNative();
+    public native String getXposedMemStringsDetails();
+
+    // [XFF-T2/T3] 模块注入痕迹:/proc/self/maps 外来 apk/dex 映射 + /proc/self/fd 外来 fd。
+    // hostPkg=宿主包名, hostApkDir=宿主 base.apk 路径,用于排除自身与系统 framework。
+    // 返回多行 MAPS_FOREIGN=/MAPS_MEMDEX=/FD_FOREIGN=...,无命中返回 "CLEAN"。
+    public native String getModuleInjectionReport(String hostPkg, String hostApkDir);
+
+    // [XFF-T5] Hook 引擎 .so dlopen(RTLD_NOLOAD) 探测。返回多行 LIB_LOADED=...,无命中 "CLEAN"。
+    public native String getArtHookLibReport();
+
+    // [XFF-T5b] 真·ClassLinker::VisitClassLoaders 旁支枚举(自校准偏移 + 每线程 SIGSEGV 守护)。
+    // 返回 VCL_TOTAL=/VCL_INMEMORY=/VCL_FRAMEWORK=... 或 "UNSUPPORTED:<原因>"(此时回退 T4/T5)。
+    public native String getVisitClassLoadersReport();
+
+    // [XFF-T6] LSPlant/Frida hook 点检测:敏感方法的 ArtMethod entrypoint 是否落在匿名可执行区。
+    // 返回多行 "类.方法 [ACC_NATIVE] [entry=0x...]",无命中 "CLEAN"。
+    public native String getHookedMethodReport();
+
     // Additional LSPosed detection methods
     public native boolean checkLSPosedMemoryNative();
     public native boolean checkLSPosedMemorySyscall();

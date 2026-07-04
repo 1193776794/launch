@@ -12,6 +12,9 @@
 #include <algorithm>
 #include <set>
 #include <dlfcn.h>
+#include <cstring>
+#include <cstdio>
+#include <linux/limits.h>
 
 #define LOG_TAG "HookDetector"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -1281,4 +1284,300 @@ MultiLayerResult HookDetector::detectMemoryHooks() {
     result.nativeResult = checkMapsForHooks() || checkFridaMemoryNative() || checkAnonymousExecutableMemory();
     result.syscallResult = checkMapsForHooksSyscall() || checkFridaMemorySyscall();
     return result;
+}
+
+// ================= [XFF] 自读内存原始字节 · Xposed 类名串扫描 =================
+// 现有 checkLSPosedMemoryNative 只看 /proc/self/maps 的“行文本(文件名)”,注入已把
+// lspd/lsposed/lsplant 等文件痕迹全藏 → 漏检。本函数改扫内存“字节内容”:
+// 读 maps 拿匿名/dalvik 区地址,直接指针 memmem 找加载进本进程的模块/框架类名串。
+// 这是 Risk Detector DetectEvilFrameworks 的核心技术;no-hook 模块实测证明:只要有
+// 模块被 scope 进来(哪怕不 hook),这些类名串就在 dalvik 区,必被扫到。
+static std::string s_xposedMemDetails;
+
+bool HookDetector::checkXposedMemoryStrings() {
+    // 只用“注入特有”needle:框架/现代API 加载进被注入进程才有的类名,
+    // 且 launch app 自己源码不含(避免自命中 app 现有 path-based 检测的字符串)。
+    // 已核对 app 源码 0 出现:org.lsposed.lspd / XposedModuleInterface / ILSPInjectedModule。
+    static const char* kNeedles[] = {
+        "org.lsposed.lspd",          // 框架 service 类(注入才有)
+        "XposedModuleInterface",     // 现代 libxposed API(注入才有)
+        "ILSPInjectedModule",        // 框架注入 service(注入才有)
+        "XposedModuleInterface$ModuleLoadedParam",
+        "org.lsposed.lspd.service",
+        "LspModuleClassLoader",            // 模块专用 classloader(注入才有)
+        "de.robv.android.xposed.XC_MethodHook",  // Xposed hook 回调基类
+        "LSPHooker_"                       // LSPlant 生成的 hook 桥类名前缀
+    };
+    std::ifstream maps("/proc/self/maps");
+    if (!maps.is_open()) return false;
+    s_xposedMemDetails.clear();
+    bool found = false;
+    std::string line;
+    while (std::getline(maps, line)) {
+        unsigned long start = 0, end = 0;
+        char perms[8] = {0};
+        char path[512] = {0};
+        int n = sscanf(line.c_str(), "%lx-%lx %7s %*x %*x:%*x %*u %511[^\n]",
+                       &start, &end, perms, path);
+        if (n < 3 || perms[0] != 'r') continue;   // 必须可读
+        std::string p = (n >= 4) ? std::string(path) : std::string();
+        // 只扫匿名区(heap/dalvik)与 dalvik-* 命名区——加载的模块类/dex 串所在处。
+        // 跳过 file-backed(含本 .so 的 .rodata,避免自己的 needle 常量自命中)。
+        bool isTarget = p.empty()
+                     || p.find("dalvik") != std::string::npos
+                     || p.rfind("[anon:", 0) == 0;
+        if (!isTarget || end <= start) continue;
+        size_t len = end - start;
+        if (len > 128UL * 1024 * 1024) continue;   // 跳过异常大区
+        const void* base = reinterpret_cast<const void*>(start);
+        for (const char* needle : kNeedles) {
+            size_t nlen = strlen(needle);
+            if (nlen == 0 || nlen > len) continue;
+            if (memmem(base, len, needle, nlen) != nullptr) {
+                LOGD("Xposed mem-string HIT: %s @ %s", needle, p.empty() ? "[anon]" : p.c_str());
+                s_xposedMemDetails += std::string(needle) + " @ " + (p.empty() ? "[anon]" : p) + "\n";
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+std::string HookDetector::getXposedMemStringsDetails() {
+    return s_xposedMemDetails.empty() ? std::string("未命中") : s_xposedMemDetails;
+}
+
+// ================= [XFF-T2/T3] 模块注入痕迹 · 外来 dex/apk 映射 + fd 扫描 =================
+// 现有检测只认识 lspd/lsposed/xposed 这些"框架关键词",模块自身的 apk/dex 路径它不查。
+// 思路反过来:宿主进程本该只 mmap 自己包的 base.apk/split + 系统 framework。任何一个
+//   /data/app/~~xxx==/<别的包>/base.apk、外来 .dex/.oat/.vdex、或内存 dex 被映射进来
+// 就是有模块被加载进本进程。dex 要执行必须被 ART mmap、模块 apk 的 fd 必须常开 →
+// 这两处痕迹比 maps 行里的关键词更硬,藏不掉。
+namespace {
+    // 系统合法容器前缀/特征——命中即排除,避免误报
+    bool isSystemContainer(const std::string& p) {
+        return p.rfind("/system/", 0) == 0 ||
+               p.rfind("/system_ext/", 0) == 0 ||
+               p.rfind("/apex/", 0) == 0 ||
+               p.rfind("/vendor/", 0) == 0 ||
+               p.rfind("/product/", 0) == 0 ||
+               p.find("/dalvik-cache/") != std::string::npos ||   // 系统 AOT 缓存
+               p.find("boot.oat") != std::string::npos ||
+               p.find("boot.art") != std::string::npos ||
+               p.find("boot-framework") != std::string::npos;
+    }
+    // 是否是"代码容器"文件(apk/dex/jar/oat/odex/vdex)
+    bool isCodeContainer(const std::string& p) {
+        static const char* kExt[] = {".apk", ".dex", ".jar", ".oat", ".odex", ".vdex"};
+        for (const char* ext : kExt) {
+            size_t el = strlen(ext);
+            if (p.size() >= el && p.compare(p.size() - el, el, ext) == 0) return true;
+            // 兼容 "xxx.dex (deleted)" / "xxx.apk!classes.dex" 这类后缀带尾巴的写法
+            if (p.find(std::string(ext) + " ") != std::string::npos ||
+                p.find(std::string(ext) + "!") != std::string::npos) return true;
+        }
+        return false;
+    }
+    // 内存 dex 特征(InMemoryDexClassLoader / ashmem dex),排除正常 JIT/boot 缓存
+    bool isInMemoryDex(const std::string& p) {
+        bool memBacked = p.rfind("/memfd:", 0) == 0 ||
+                         p.find("/dev/ashmem/") != std::string::npos ||
+                         p.find("(deleted)") != std::string::npos;
+        if (!memBacked) return false;
+        // 只认带 dex/classes/vdex 字样的,排除 jit-cache / jit-zygote / boot
+        bool looksDex = p.find("dex") != std::string::npos ||
+                        p.find("classes") != std::string::npos ||
+                        p.find("vdex") != std::string::npos;
+        bool jit = p.find("jit-cache") != std::string::npos ||
+                   p.find("jit-zygote") != std::string::npos ||
+                   p.find("boot") != std::string::npos;
+        return looksDex && !jit;
+    }
+    bool belongsToHost(const std::string& p, const std::string& hostPkg,
+                       const std::string& hostApkDir) {
+        if (!hostPkg.empty() && p.find(hostPkg) != std::string::npos) return true;
+        if (!hostApkDir.empty() && p.find(hostApkDir) != std::string::npos) return true;
+        return false;
+    }
+    // 已知会合法映射进普通 app 进程的系统包(WebView provider / Chrome / GMS dynamite),
+    // 命中即排除,避免把系统 WebView 的 base.apk 误报成注入模块。
+    bool isKnownSystemInjector(const std::string& p) {
+        static const char* kInj[] = {
+            "com.google.android.webview",
+            "com.android.webview",
+            "com.google.android.trichromelibrary",
+            "com.android.chrome",
+            "org.chromium",
+            "com.google.android.gms",           // GMS dynamite 模块
+        };
+        for (const char* s : kInj) {
+            if (p.find(s) != std::string::npos) return true;
+        }
+        return false;
+    }
+}
+
+std::string HookDetector::getModuleInjectionReport(const std::string& hostPkg,
+                                                   const std::string& hostApkDir) {
+    std::string report;
+    std::set<std::string> seen;
+
+    // ---- T2: /proc/self/maps 外来代码容器映射 ----
+    std::string maps = syscall_read_file_full("/proc/self/maps");
+    std::stringstream ss(maps);
+    std::string line;
+    while (std::getline(ss, line)) {
+        // 取最后一个字段(路径)。maps 路径可能含空格,取第 6 列到行尾更稳:
+        // addr perm off dev inode path —— 前 5 列无空格,找到第 5 个空白后即为路径起点。
+        int spaces = 0; size_t i = 0;
+        for (; i < line.size() && spaces < 5; ++i) {
+            if (line[i] == ' ') { spaces++; while (i + 1 < line.size() && line[i + 1] == ' ') ++i; }
+        }
+        if (spaces < 5 || i >= line.size()) continue;
+        std::string path = line.substr(i);
+        if (path.empty() || path[0] == '[') continue;   // 匿名/[stack]/[heap]
+
+        bool foreign = false;
+        const char* kind = nullptr;
+        if (isCodeContainer(path) && !isSystemContainer(path) &&
+            !belongsToHost(path, hostPkg, hostApkDir) && !isKnownSystemInjector(path)) {
+            foreign = true; kind = "MAPS_FOREIGN";
+        } else if (isInMemoryDex(path) && !belongsToHost(path, hostPkg, hostApkDir) &&
+                   !isKnownSystemInjector(path)) {
+            foreign = true; kind = "MAPS_MEMDEX";
+        }
+        if (!foreign) continue;
+        if (seen.count(path)) continue;
+        seen.insert(path);
+        report += std::string(kind) + "=" + path + "\n";
+        LOGD("[T2] foreign container in maps: %s", path.c_str());
+    }
+
+    // ---- T3: /proc/self/fd 外来打开文件 ----
+    DIR* d = opendir("/proc/self/fd");
+    if (d) {
+        struct dirent* e;
+        char target[PATH_MAX];
+        while ((e = readdir(d)) != nullptr) {
+            if (e->d_name[0] == '.') continue;
+            std::string linkp = std::string("/proc/self/fd/") + e->d_name;
+            ssize_t n = readlink(linkp.c_str(), target, sizeof(target) - 1);
+            if (n <= 0) continue;
+            target[n] = '\0';
+            std::string t(target);
+
+            bool suspicious = isCodeContainer(t) || isInMemoryDex(t) ||
+                              t.rfind("/memfd:", 0) == 0;   // memfd 承载的 dex/apk
+            if (!suspicious) continue;
+            if (isSystemContainer(t) || belongsToHost(t, hostPkg, hostApkDir) ||
+                isKnownSystemInjector(t)) continue;
+            // 排除正常 JIT/boot memfd
+            if (t.find("jit-cache") != std::string::npos ||
+                t.find("jit-zygote") != std::string::npos ||
+                t.find("boot") != std::string::npos) continue;
+
+            std::string key = "fd:" + t;
+            if (seen.count(key)) continue;
+            seen.insert(key);
+            report += "FD_FOREIGN=" + t + "\n";
+            LOGD("[T3] foreign fd: %s -> %s", e->d_name, t.c_str());
+        }
+        closedir(d);
+    }
+
+    // ---- T2b: 匿名内存 DEX 内容扫描(抓 InMemoryDexClassLoader 注入的框架 dex) ----
+    // 现代 LSPosed 把模块/框架 dex 读进 [anon:dalvik-DEX data] 匿名内存,无文件路径 → 上面的
+    // maps/fd 文件扫描全抓不到。这里直接读匿名内存 dex 区的*字节*,memmem 找框架特征串。
+    // 关键防自命中:**只扫 dalvik-DEX 内存 dex 区**,不扫 Java 堆(dalvik-main space 等)——
+    // app 自己的 dex 是文件映射的,任何 [anon:dalvik-DEX data] 都是 InMemoryDexClassLoader 加载的
+    // 内存 dex,里面绝不含本 app 的 Java 字面量(那些在文件 dex + Java 堆里,已被排除)。
+    // needle 用框架专有简单名/接口名(经内存 CompactDex 编码后 slash 全描述符可能不连续,故用简单名)。
+    static const char* kFwDescriptors[] = {
+        "LspModuleClassLoader",           // LSPosed 模块专用 loader(框架专有)
+        "IXposedHookLoadPackage",         // 经典 Xposed 模块入口接口
+        "de.robv.android.xposed",         // 经典 Xposed API 包名
+        "org.lsposed.lspd",               // LSPosed 框架包名
+        "Lorg/lsposed/",                  // slash 描述符(若未编码)
+        "Lde/robv/android/xposed/",
+    };
+    std::stringstream ssd(maps);
+    std::string dline;
+    int anonScanned = 0;
+    while (std::getline(ssd, dline)) {
+        unsigned long start = 0, end = 0;
+        char perms[8] = {0};
+        char dpath[512] = {0};
+        int n = sscanf(dline.c_str(), "%lx-%lx %7s %*x %*x:%*x %*u %511[^\n]",
+                       &start, &end, perms, dpath);
+        if (n < 3 || perms[0] != 'r') continue;   // 必须可读才能自读
+        std::string p = (n >= 4) ? std::string(dpath) : std::string();
+        // 只扫内存 dex 数据区(排除 Java 堆 dalvik-main/large-object/zygote space,防自命中)
+        bool isMemDexRegion = (p.find("dalvik-DEX") != std::string::npos);
+        if (!isMemDexRegion || end <= start) continue;
+        size_t len = end - start;
+        if (len > 96UL * 1024 * 1024) continue;    // 跳过异常大区
+        anonScanned++;
+        const void* base = reinterpret_cast<const void*>(start);
+        for (const char* desc : kFwDescriptors) {
+            size_t dl = strlen(desc);
+            if (dl > len) continue;
+            if (memmem(base, len, desc, dl) != nullptr) {
+                std::string keyd = std::string("anon:") + desc;
+                if (seen.count(keyd)) break;
+                seen.insert(keyd);
+                report += std::string("ANON_DEX_FW=") + desc + " @ " + p + "\n";
+                LOGD("[T2b] framework dex descriptor in anon memory: %s @ %s", desc, p.c_str());
+                break;   // 该区命中一个框架特征即够,不重复
+            }
+        }
+    }
+    LOGD("[T2b] in-memory dex regions scanned: %d", anonScanned);
+
+    if (report.empty()) report = "CLEAN\n";
+    return report;
+}
+
+// ================= [XFF-T5] Hook 引擎 .so dlopen 探测 =================
+// dlopen(RTLD_NOLOAD) 只在库"已加载"时返回非空 handle——它查的是 linker 内部的已加载库链表,
+// 不是 /proc/self/maps 文本。改 maps 行文本能骗过 checkLSPosedMemoryNative,但骗不过 linker 记账。
+// liblspd.so / libxposed_art.so 只要 LSPosed 把框架注入了本进程,必在链表里。
+std::string HookDetector::getArtHookLibReport() {
+    static const char* kEngineLibs[] = {
+        // LSPosed / EdXposed / 经典 Xposed 框架核心
+        "liblspd.so", "libxposed_art.so", "libedxp.so", "libriru_edxp.so",
+        "libriru_lsposed.so", "libriruloader.so",
+        // LSPlant / Pine / YAHFA / SandHook —— ART 方法 hook 引擎
+        "liblsplant.so", "libpine.so", "libyahfa.so", "libsandhook.so",
+        "libSandHook.so", "libwhale.so",
+        // Substrate / Cydia 系
+        "libsubstrate.so", "libsubstrate-dvm.so",
+        // Zygisk 注入器本体
+        "libzygisk.so",
+    };
+    std::string report;
+    std::set<std::string> reported;
+    for (const char* lib : kEngineLibs) {
+        void* h = dlopen(lib, RTLD_NOLOAD | RTLD_NOW);
+        if (h != nullptr) {
+            report += std::string("LIB_LOADED=") + lib + "\n";
+            reported.insert(lib);
+            LOGD("[T5] hook engine lib loaded (dlopen): %s", lib);
+            dlclose(h);   // NOLOAD 不增加真实引用,dlclose 抵消本次 dlopen 的计数
+        }
+    }
+
+    // maps 兜底:Android 10+ zygisk 注入的引擎库常在独立 linker namespace,
+    // dlopen(RTLD_NOLOAD) 从 app namespace 看不到 → 直接扫 /proc/self/maps 的库名。
+    std::string maps = syscall_read_file_full("/proc/self/maps");
+    for (const char* lib : kEngineLibs) {
+        if (reported.count(lib)) continue;
+        if (maps.find(lib) != std::string::npos) {
+            report += std::string("LIB_MAPPED=") + lib + "\n";
+            reported.insert(lib);
+            LOGD("[T5] hook engine lib in maps: %s", lib);
+        }
+    }
+
+    if (report.empty()) report = "CLEAN\n";
+    return report;
 }

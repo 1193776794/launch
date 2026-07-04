@@ -143,6 +143,383 @@ public class HookDetector {
     }
 
     /**
+     * [XFF] 自读内存字节 · Xposed/LSPosed 类名串扫描(DetectEvilFrameworks 技术)。
+     * 现有 Xposed/LSPosed 检测只查 maps 文件名 + 文件路径,注入已把这些痕迹全藏 → 绕过。
+     * 本项改扫内存“字节内容”:读 /proc/self/maps 拿匿名/dalvik 区地址 → native 直接指针 memmem
+     * 找加载进本进程的框架/模块类名串。no-hook 模块实测:只要有模块被 scope 进来(哪怕不 hook),
+     * 这些串就在 dalvik 区必被扫到。内核 proc-mem 伪装拦不住(进程自读 V3)。
+     */
+    public DetectionItem detectXposedMemStrings() {
+        DetectionItem item = new DetectionItem("Xposed 内存串扫描 [自读]",
+                "自读内存原始字节扫 Xposed/LSPosed 类名串");
+
+        boolean nativeResult = nativeDetector.checkXposedMemoryStringsNative();
+        item.setLayerResult(DetectionLayer.NATIVE, nativeResult);
+
+        if (nativeResult) {
+            item.setStatus(DetectionStatus.RISK);
+            String details = nativeDetector.getXposedMemStringsDetails();
+            item.setDetail("内存命中 Xposed/LSPosed 类名串:\n" + details);
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未在内存中发现 Xposed/LSPosed 类名串");
+        }
+        return item;
+    }
+
+    /**
+     * [XFF-T1+T2+T3] 模块注入痕迹检测(外来 DEX/APK/FD)。
+     * Java 层(T1):遍历宿主自身 ClassLoader 的 pathList.dexElements,任何 dexFile 路径不属于
+     *   宿主 base.apk/split 且非 /system|/apex 的 = 被 path-based 注入追加进来的模块 dex。
+     * Native 层(T2/T3):扫 /proc/self/maps 外来代码容器映射 + /proc/self/fd 外来打开文件。
+     *   dex 要执行必被 mmap、模块 apk 的 fd 常开 → 藏了 maps 关键词也藏不掉文件本体。
+     */
+    public DetectionItem detectModuleInjectionArtifacts() {
+        DetectionItem item = new DetectionItem("模块注入痕迹 [外来DEX/FD]",
+                "扫宿主 dexElements + maps/fd 里的外来模块文件");
+
+        // ---- T1: 宿主 dexElements 外来 dex ----
+        boolean javaDetected = false;
+        try {
+            java.util.Set<String> hostPaths = getHostApkPaths();
+            ClassLoader loader = context.getClassLoader();
+            while (loader != null) {
+                for (String dp : extractDexElementPaths(loader)) {
+                    if (dp == null || dp.isEmpty()) continue;
+                    if (isHostOrSystemPath(dp, hostPaths)) continue;
+                    javaDetected = true;
+                    item.addDetectionDetail("📦 外来DEX", "宿主ClassLoader注入",
+                            dp, DetectionLayer.JAVA, "⚠️");
+                }
+                loader = loader.getParent();
+            }
+        } catch (Exception e) {
+            android.util.Log.d("HookDetector", "T1 dexElements scan error: " + e.getMessage());
+        }
+        item.setLayerResult(DetectionLayer.JAVA, javaDetected);
+
+        // ---- T2/T3: native maps/fd 外来文件 ----
+        boolean nativeDetected = false;
+        try {
+            String hostPkg = context.getPackageName();
+            String hostApkDir = context.getApplicationInfo().sourceDir;
+            String report = nativeDetector.getModuleInjectionReport(hostPkg, hostApkDir);
+            if (report != null) {
+                for (String ln : report.split("\n")) {
+                    ln = ln.trim();
+                    if (ln.isEmpty() || ln.equals("CLEAN")) continue;
+                    int eq = ln.indexOf('=');
+                    if (eq <= 0) continue;
+                    String kind = ln.substring(0, eq);
+                    String val = ln.substring(eq + 1);
+                    nativeDetected = true;
+                    String cat;
+                    if (kind.equals("ANON_DEX_FW")) cat = "🧬 内存框架DEX";
+                    else if (kind.startsWith("FD")) cat = "🔗 外来FD";
+                    else if (kind.contains("MEMDEX")) cat = "🧬 内存DEX";
+                    else cat = "💾 外来映射";
+                    item.addDetectionDetail(cat, kind, val, DetectionLayer.NATIVE, "🔍");
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.d("HookDetector", "T2/T3 native report error: " + e.getMessage());
+        }
+        item.setLayerResult(DetectionLayer.NATIVE, nativeDetected);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到外来模块文件(注入痕迹)");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未发现外来 DEX/APK/FD");
+        }
+        return item;
+    }
+
+    /**
+     * [XFF-T4+T5] ClassLoader 旁支枚举 + Hook 引擎 .so 探测。
+     * 现有父链 walk 只看 getParent(),看不到 LSPosed 的框架/模块 loader(旁支)。
+     * Java 层(T4):从 Thread.getAllStackTraces() 各线程 contextClassLoader + 已加载框架类的
+     *   defining loader 收集全量 loader,查 InMemoryDexClassLoader 是否定义了 org.lsposed.* /
+     *   LspModuleClassLoader。Native 层(T5):dlopen(RTLD_NOLOAD) 命中已加载的引擎库。
+     */
+    public DetectionItem detectClassLoaderEnumeration() {
+        DetectionItem item = new DetectionItem("ClassLoader 旁支枚举",
+                "枚举全量 ClassLoader + 探测 Hook 引擎 .so");
+
+        boolean javaDetected = false;
+        try {
+            for (ClassLoader cl : collectAllClassLoaders()) {
+                if (cl == null) continue;
+                String cn = cl.getClass().getName();
+                if (cn.contains("LspModuleClassLoader") || cn.toLowerCase().contains("lsposed")) {
+                    javaDetected = true;
+                    item.addDetectionDetail("🧩 旁支ClassLoader", cn, cl.toString(),
+                            DetectionLayer.JAVA, "⚠️");
+                    continue;
+                }
+                if (cn.contains("InMemoryDexClassLoader")) {
+                    String probe = classLoaderDefinesFramework(cl);
+                    if (probe != null) {
+                        javaDetected = true;
+                        item.addDetectionDetail("🧬 内存框架DEX", cn,
+                                "该 loader 直接定义: " + probe, DetectionLayer.JAVA, "🚨");
+                    }
+                }
+            }
+            try {
+                Class.forName("org.lsposed.lspd.util.LspModuleClassLoader");
+                javaDetected = true;
+                item.addDetectionDetail("🧩 框架类", "LspModuleClassLoader",
+                        "org.lsposed.lspd.util.LspModuleClassLoader 已加载",
+                        DetectionLayer.JAVA, "🚨");
+            } catch (ClassNotFoundException ignored) {
+            }
+        } catch (Exception e) {
+            android.util.Log.d("HookDetector", "T4 classloader enum error: " + e.getMessage());
+        }
+        item.setLayerResult(DetectionLayer.JAVA, javaDetected);
+
+        // ---- T5: native 引擎 .so 探测 ----
+        boolean nativeDetected = false;
+        try {
+            String report = nativeDetector.getArtHookLibReport();
+            if (report != null) {
+                for (String ln : report.split("\n")) {
+                    ln = ln.trim();
+                    if (ln.isEmpty() || ln.equals("CLEAN")) continue;
+                    int eq = ln.indexOf('=');
+                    if (eq <= 0) continue;
+                    nativeDetected = true;
+                    item.addDetectionDetail("🔧 Hook引擎库", ln.substring(eq + 1),
+                            "dlopen(RTLD_NOLOAD) 命中(已加载本进程)", DetectionLayer.NATIVE, "⚙️");
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.d("HookDetector", "T5 native lib probe error: " + e.getMessage());
+        }
+
+        // ---- T5b: native 真·VisitClassLoaders 旁支枚举 ----
+        try {
+            String vcl = nativeDetector.getVisitClassLoadersReport();
+            if (vcl != null && !vcl.startsWith("UNSUPPORTED")) {
+                for (String ln : vcl.split("\n")) {
+                    ln = ln.trim();
+                    if (ln.isEmpty()) continue;
+                    if (ln.startsWith("VCL_FRAMEWORK=")) {
+                        nativeDetected = true;
+                        item.addDetectionDetail("🧬 旁支框架Loader", ln.substring("VCL_FRAMEWORK=".length()),
+                                "VisitClassLoaders 枚举到框架 ClassLoader", DetectionLayer.NATIVE, "🚨");
+                    } else if (ln.startsWith("VCL_CLASS=")) {
+                        nativeDetected = true;
+                        item.addDetectionDetail("🧬 已加载框架类", ln.substring("VCL_CLASS=".length()),
+                                "VisitClasses 在 ART 类表命中框架类(框架 loader 不进 class_loaders_ 也能抓)",
+                                DetectionLayer.NATIVE, "🚨");
+                    } else if (ln.startsWith("VCL_TOTAL=") || ln.startsWith("VCL_INMEMORY=")
+                            || ln.startsWith("VCL_CLASSHITS=")) {
+                        item.addDetectionDetail("📊 ClassLoader统计", ln,
+                                "native 全量枚举计数", DetectionLayer.NATIVE, "🔢");
+                    }
+                }
+            } else {
+                android.util.Log.d("HookDetector", "T5b VisitClassLoaders: " + vcl);
+            }
+        } catch (Throwable t) {
+            android.util.Log.d("HookDetector", "T5b VisitClassLoaders error: " + t.getMessage());
+        }
+        item.setLayerResult(DetectionLayer.NATIVE, nativeDetected);
+
+        if (item.getMostTrustworthyResult()) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到 Hook 框架 ClassLoader/引擎库");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("未发现旁支框架 ClassLoader / 引擎库");
+        }
+        return item;
+    }
+
+    /**
+     * [XFF-T6] LSPlant/Frida hook 点检测:敏感方法的 ArtMethod entrypoint 是否落在匿名可执行区。
+     * jmethodID=ArtMethod*,查 access_flags kAccNative + 头部指针槽是否指向匿名可执行内存(trampoline)。
+     * 正常方法入口只在 .oat/libart/JIT-cache(均文件或具名映射);落在匿名可执行区=被 inline 换头。
+     */
+    public DetectionItem detectLSPlantHookedMethods() {
+        DetectionItem item = new DetectionItem("LSPlant Hook点 [ArtMethod]",
+                "查敏感方法 entrypoint 是否落在匿名可执行区");
+
+        boolean detected = false;
+        int hookCount = 0;
+        try {
+            String report = nativeDetector.getHookedMethodReport();
+            if (report != null && !report.trim().equals("CLEAN")
+                    && !report.startsWith("UNSUPPORTED")) {
+                for (String ln : report.split("\n")) {
+                    ln = ln.trim();
+                    if (ln.isEmpty() || ln.equals("CLEAN")) continue;
+                    detected = true;
+                    hookCount++;
+                    if (ln.startsWith("ANON_EXEC=")) {
+                        item.addDetectionDetail("🧨 注入代码区", ln.substring("ANON_EXEC=".length()),
+                                "无名匿名可执行区 = LSPlant trampoline / InMemoryDex 框架编译码(注入代码本体)",
+                                DetectionLayer.NATIVE, "🚨");
+                    } else {
+                        String val = ln.startsWith("HOOKED=") ? ln.substring("HOOKED=".length()) : ln;
+                        item.addDetectionDetail("🎯 被Hook方法", val,
+                                "该方法 ArtMethod entrypoint 落在匿名可执行内存(LSPlant/Frida trampoline)",
+                                DetectionLayer.NATIVE, "🚨");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.d("HookDetector", "T6 hooked method report error: " + e.getMessage());
+        }
+        item.setLayerResult(DetectionLayer.NATIVE, detected);
+        item.setLayerResult(DetectionLayer.SYSCALL, detected);
+
+        if (detected) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到 " + hookCount + " 个方法被 LSPlant/Frida hook");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("已扫描框架方法, entrypoint 均正常");
+        }
+        return item;
+    }
+
+    // ---- T1/T4 辅助方法 ----
+
+    /** 宿主自身合法 apk/lib 路径集合(base.apk + splits + nativeLibDir) */
+    private java.util.Set<String> getHostApkPaths() {
+        java.util.Set<String> s = new java.util.HashSet<>();
+        try {
+            android.content.pm.ApplicationInfo ai = context.getApplicationInfo();
+            if (ai.sourceDir != null) s.add(ai.sourceDir);
+            if (ai.publicSourceDir != null) s.add(ai.publicSourceDir);
+            if (ai.splitSourceDirs != null) {
+                for (String sp : ai.splitSourceDirs) if (sp != null) s.add(sp);
+            }
+            if (ai.nativeLibraryDir != null) s.add(ai.nativeLibraryDir);
+        } catch (Exception ignored) {
+        }
+        return s;
+    }
+
+    /** 路径是否属于宿主自身或系统 framework(命中即非注入) */
+    private boolean isHostOrSystemPath(String p, java.util.Set<String> hostPaths) {
+        if (hostPaths.contains(p)) return true;
+        String pkg = context.getPackageName();
+        if (pkg != null && p.contains(pkg)) return true;   // 宿主 apk 目录/oat 均含包名
+        return p.startsWith("/system/") || p.startsWith("/apex/") ||
+                p.startsWith("/vendor/") || p.startsWith("/product/") ||
+                p.startsWith("/system_ext/") || p.contains("/dalvik-cache/");
+    }
+
+    /** 反射取 BaseDexClassLoader.pathList.dexElements[*] 的文件路径 */
+    private java.util.List<String> extractDexElementPaths(ClassLoader loader) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        try {
+            Class<?> bdcl = Class.forName("dalvik.system.BaseDexClassLoader");
+            if (!bdcl.isInstance(loader)) return out;
+            java.lang.reflect.Field pathListField = bdcl.getDeclaredField("pathList");
+            pathListField.setAccessible(true);
+            Object pathList = pathListField.get(loader);
+            if (pathList == null) return out;
+            java.lang.reflect.Field dexElementsField = pathList.getClass().getDeclaredField("dexElements");
+            dexElementsField.setAccessible(true);
+            Object[] elements = (Object[]) dexElementsField.get(pathList);
+            if (elements == null) return out;
+            for (Object el : elements) {
+                String path = null;
+                // 新版 Element.path (File)
+                try {
+                    java.lang.reflect.Field pathField = el.getClass().getDeclaredField("path");
+                    pathField.setAccessible(true);
+                    Object f = pathField.get(el);
+                    if (f != null) path = f.toString();
+                } catch (NoSuchFieldException ignored) {
+                }
+                // 回退: Element.dexFile.mFileName
+                if (path == null || path.isEmpty()) {
+                    try {
+                        java.lang.reflect.Field dexFileField = el.getClass().getDeclaredField("dexFile");
+                        dexFileField.setAccessible(true);
+                        Object dexFile = dexFileField.get(el);
+                        if (dexFile != null) {
+                            java.lang.reflect.Field nameField = dexFile.getClass().getDeclaredField("mFileName");
+                            nameField.setAccessible(true);
+                            Object nm = nameField.get(dexFile);
+                            if (nm != null) path = nm.toString();
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+                if (path != null && !path.isEmpty() && !path.equals("null")) out.add(path);
+            }
+        } catch (Exception ignored) {
+        }
+        return out;
+    }
+
+    /** 收集全量 ClassLoader(父链 + 线程 contextClassLoader + 框架类 defining loader) */
+    private java.util.Set<ClassLoader> collectAllClassLoaders() {
+        java.util.Set<ClassLoader> set = new java.util.HashSet<>();
+        ClassLoader l = context.getClassLoader();
+        while (l != null) {
+            set.add(l);
+            l = l.getParent();
+        }
+        try {
+            for (Thread t : Thread.getAllStackTraces().keySet()) {
+                try {
+                    ClassLoader ccl = t.getContextClassLoader();
+                    while (ccl != null) {
+                        set.add(ccl);
+                        ccl = ccl.getParent();
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        String[] fw = {
+                "de.robv.android.xposed.XposedBridge",
+                "org.lsposed.lspd.core.Startup",
+                "io.github.lsposed.lspd.core.Startup",
+                "io.github.libxposed.api.XposedInterface"
+        };
+        for (String cn : fw) {
+            try {
+                ClassLoader cl = Class.forName(cn).getClassLoader();
+                while (cl != null) {
+                    set.add(cl);
+                    cl = cl.getParent();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return set;
+    }
+
+    /** loader 是否"直接定义"(非委托父链)了框架类 → InMemoryDex 框架核心的实锤 */
+    private String classLoaderDefinesFramework(ClassLoader cl) {
+        String[] probes = {
+                "org.lsposed.lspd.core.Startup",
+                "org.lsposed.lspd.service.ILSPApplicationService",
+                "de.robv.android.xposed.XposedBridge",
+                "io.github.libxposed.api.XposedInterface"
+        };
+        for (String p : probes) {
+            try {
+                Class<?> c = cl.loadClass(p);
+                if (c.getClassLoader() == cl) return p;   // 由该 loader 直接定义
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    /**
      * Detect Frida
      */
     public DetectionItem detectFrida() {
@@ -803,6 +1180,10 @@ public class HookDetector {
         items.add(detectXposed());
         items.add(detectFrida());
         items.add(detectLSPosed());
+        items.add(detectXposedMemStrings());   // [XFF] 自读内存字节扫类名串
+        items.add(detectModuleInjectionArtifacts());  // [XFF-T1/T2/T3] 外来 DEX/APK/FD
+        items.add(detectClassLoaderEnumeration());    // [XFF-T4/T5] ClassLoader 旁支 + 引擎库
+        items.add(detectLSPlantHookedMethods());      // [XFF-T6] ArtMethod hook 点
         items.add(detectZygisk());
         items.add(detectSmapsHook());
         items.add(detectMemoryIntegrity());

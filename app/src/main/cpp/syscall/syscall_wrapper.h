@@ -227,6 +227,27 @@ static inline std::string syscall_read_file(const char *path, size_t maxSize = 4
 }
 
 /**
+ * Read entire file via direct syscall, looping read() until EOF.
+ * /proc/self/maps 是 seq_file,单次 read() 在部分内核上只返回一个 chunk 会截断,
+ * 导致高地址映射(如 apex 里的 libart.so)读不到。凡需要*完整* maps 的场景用此函数。
+ * @param path File path
+ * @param cap  Safety cap (default 8MB)
+ */
+static inline std::string syscall_read_file_full(const char *path, size_t cap = 8u * 1024 * 1024) {
+    int fd = syscall_open(path, O_RDONLY);
+    if (fd < 0) return "";
+    std::string result;
+    char buf[65536];
+    while (result.size() < cap) {
+        ssize_t n = syscall_read(fd, buf, sizeof(buf));
+        if (n <= 0) break;
+        result.append(buf, (size_t) n);
+    }
+    syscall_close(fd);
+    return result;
+}
+
+/**
  * Check if file exists and is readable using direct syscall
  * @param path File path
  * @return true if exists
