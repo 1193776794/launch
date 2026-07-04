@@ -68,6 +68,19 @@ public class NativeDetector {
     // 返回多行 "类.方法 [ACC_NATIVE] [entry=0x...]",无命中 "CLEAN"。
     public native String getHookedMethodReport();
 
+    // [XFF-A] 函数级 inline-hook 检测:内存字节 vs 磁盘 ELF 字节比对 + 具名 hook 框架 anon 区。
+    // 返回多行 FUNC_HOOK=.../NAMED_HOOK=...,无命中 "CLEAN"。
+    public native String getFunctionHookReport();
+
+    // [XFF-B1] SMC 自修改代码执行探针(反 Frida/QBDI/DBI)。0=正常 1=异常 -1=无法测试。
+    public native int smcExecProbe();
+
+    // [XFF-B2] 内存写入 CNTVCT 计时基准(反模拟器/反单步)。返回每轮周期数,-1=失败。
+    public native long memWriteTimingCycles();
+
+    // [XFF-B3] mincore demand-paging 一致性(反模拟器/反 replay)。0=正常 1=异常 -1=无法测试。
+    public native int demandPagingAnomaly();
+
     // Additional LSPosed detection methods
     public native boolean checkLSPosedMemoryNative();
     public native boolean checkLSPosedMemorySyscall();

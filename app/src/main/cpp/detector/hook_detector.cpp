@@ -15,6 +15,22 @@
 #include <cstring>
 #include <cstdio>
 #include <linux/limits.h>
+#include <fcntl.h>
+
+// [XFF] 经 /proc/self/mem 的 pread 安全读进程自身内存(读到不可访问页返 -1/EIO,不 SIGSEGV;
+// 而直接指针 memmem 遇到 maps 标 r 但实际 fault 的页会崩)。返回实际读入字节数,块内复用缓冲。
+static size_t xffPreadRegion(int memfd, unsigned long start, size_t len,
+                             std::vector<char>& buf, size_t cap) {
+    size_t toRead = len < cap ? len : cap;
+    if (buf.size() < toRead) buf.resize(toRead);
+    size_t done = 0;
+    while (done < toRead) {
+        ssize_t got = pread(memfd, buf.data() + done, toRead - done, (off_t)(start + done));
+        if (got <= 0) break;   // 不可读页 → 停在此,返回已读前缀
+        done += (size_t) got;
+    }
+    return done;
+}
 
 #define LOG_TAG "HookDetector"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -667,6 +683,7 @@ bool HookDetector::checkSmapsIntegrity() {
         "libart.so",        // Android Runtime (Xposed/LSPosed 主要 Hook 点)
         "libc.so",          // C 标准库 (Frida 常 Hook)
         "libandroid_runtime.so",  // Android Runtime JNI
+        "liblaunch.so",     // [XFF-C] 检测器自身:自己代码段被 inline-patch/hook 也要能发现
         nullptr
     };
 
@@ -1310,9 +1327,12 @@ bool HookDetector::checkXposedMemoryStrings() {
     };
     std::ifstream maps("/proc/self/maps");
     if (!maps.is_open()) return false;
+    int memfd = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);   // 经 pread 安全读,防野读崩
+    if (memfd < 0) return false;
     s_xposedMemDetails.clear();
     bool found = false;
     std::string line;
+    std::vector<char> rbuf;
     while (std::getline(maps, line)) {
         unsigned long start = 0, end = 0;
         char perms[8] = {0};
@@ -1329,17 +1349,19 @@ bool HookDetector::checkXposedMemoryStrings() {
         if (!isTarget || end <= start) continue;
         size_t len = end - start;
         if (len > 128UL * 1024 * 1024) continue;   // 跳过异常大区
-        const void* base = reinterpret_cast<const void*>(start);
+        size_t got = xffPreadRegion(memfd, start, len, rbuf, 64UL * 1024 * 1024);
+        if (got == 0) continue;
         for (const char* needle : kNeedles) {
             size_t nlen = strlen(needle);
-            if (nlen == 0 || nlen > len) continue;
-            if (memmem(base, len, needle, nlen) != nullptr) {
+            if (nlen == 0 || nlen > got) continue;
+            if (memmem(rbuf.data(), got, needle, nlen) != nullptr) {
                 LOGD("Xposed mem-string HIT: %s @ %s", needle, p.empty() ? "[anon]" : p.c_str());
                 s_xposedMemDetails += std::string(needle) + " @ " + (p.empty() ? "[anon]" : p) + "\n";
                 found = true;
             }
         }
     }
+    close(memfd);
     return found;
 }
 
@@ -1503,7 +1525,9 @@ std::string HookDetector::getModuleInjectionReport(const std::string& hostPkg,
     std::stringstream ssd(maps);
     std::string dline;
     int anonScanned = 0;
-    while (std::getline(ssd, dline)) {
+    int memfd2 = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);   // 经 pread 安全读,防野读崩
+    std::vector<char> dbuf;
+    while (memfd2 >= 0 && std::getline(ssd, dline)) {
         unsigned long start = 0, end = 0;
         char perms[8] = {0};
         char dpath[512] = {0};
@@ -1517,11 +1541,12 @@ std::string HookDetector::getModuleInjectionReport(const std::string& hostPkg,
         size_t len = end - start;
         if (len > 96UL * 1024 * 1024) continue;    // 跳过异常大区
         anonScanned++;
-        const void* base = reinterpret_cast<const void*>(start);
+        size_t got = xffPreadRegion(memfd2, start, len, dbuf, 64UL * 1024 * 1024);
+        if (got == 0) continue;
         for (const char* desc : kFwDescriptors) {
             size_t dl = strlen(desc);
-            if (dl > len) continue;
-            if (memmem(base, len, desc, dl) != nullptr) {
+            if (dl > got) continue;
+            if (memmem(dbuf.data(), got, desc, dl) != nullptr) {
                 std::string keyd = std::string("anon:") + desc;
                 if (seen.count(keyd)) break;
                 seen.insert(keyd);
@@ -1531,6 +1556,7 @@ std::string HookDetector::getModuleInjectionReport(const std::string& hostPkg,
             }
         }
     }
+    if (memfd2 >= 0) close(memfd2);
     LOGD("[T2b] in-memory dex regions scanned: %d", anonScanned);
 
     if (report.empty()) report = "CLEAN\n";

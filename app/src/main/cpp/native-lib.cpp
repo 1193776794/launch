@@ -640,6 +640,264 @@ static uintptr_t xffResolveInModule(uintptr_t base, const std::string &path, con
     return result;
 }
 
+// ============ [XFF-A] 函数级 inline-hook 检测:内存字节 vs 磁盘 ELF 字节比对 ============
+// 解析 (soname,symbol) 的 st_value,读磁盘 ELF 在该处的原始首字节 + 读内存运行时首字节。
+// inline hook 会把函数头几条指令改成跳 trampoline 的分支/ret → 内存字节 ≠ 磁盘字节。
+// 序言(stp x29,x30 / bti c / sub sp)是位置无关的,不受重定位影响 → 首 16 字节比对可靠。
+// 返回 true=成功取到两侧字节。
+static bool xffFuncBytes(const std::vector<XffHookRegion> &regs, const char *soname,
+                         const char *symbol, uint8_t diskOut[16], uint8_t memOut[16],
+                         uintptr_t *addrOut) {
+    uintptr_t base = 0;
+    std::string path;
+    if (!xffFindModule(soname, &base, &path)) return false;
+
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    struct stat st;
+    if (fstat(fd, &st) < 0 || (size_t) st.st_size < sizeof(ElfW(Ehdr))) { close(fd); return false; }
+    size_t sz = (size_t) st.st_size;
+    void *map = mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) return false;
+
+    bool ok = false;
+    const uint8_t *p = (const uint8_t *) map;
+    const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *) p;
+    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) == 0 && eh->e_phoff != 0 && eh->e_phnum > 0 &&
+        eh->e_phoff + (size_t) eh->e_phnum * sizeof(ElfW(Phdr)) <= sz) {
+        const ElfW(Phdr) *ph = (const ElfW(Phdr) *) (p + eh->e_phoff);
+        const ElfW(Phdr) *dyn = nullptr;
+        for (int i = 0; i < eh->e_phnum; i++) if (ph[i].p_type == PT_DYNAMIC) { dyn = &ph[i]; break; }
+        auto v2off = [&](uintptr_t vaddr) -> size_t {
+            for (int i = 0; i < eh->e_phnum; i++)
+                if (ph[i].p_type == PT_LOAD && vaddr >= ph[i].p_vaddr &&
+                    vaddr < ph[i].p_vaddr + ph[i].p_filesz)
+                    return (size_t) (ph[i].p_offset + (vaddr - ph[i].p_vaddr));
+            return (size_t) -1;
+        };
+        if (dyn && dyn->p_offset + dyn->p_filesz <= sz) {
+            const ElfW(Dyn) *d = (const ElfW(Dyn) *) (p + dyn->p_offset);
+            uintptr_t symtabV = 0, strtabV = 0;
+            size_t maxDyn = dyn->p_filesz / sizeof(ElfW(Dyn));
+            for (size_t i = 0; i < maxDyn && d[i].d_tag != DT_NULL; i++) {
+                if (d[i].d_tag == DT_SYMTAB) symtabV = (uintptr_t) d[i].d_un.d_ptr;
+                else if (d[i].d_tag == DT_STRTAB) strtabV = (uintptr_t) d[i].d_un.d_ptr;
+            }
+            if (symtabV && strtabV && strtabV > symtabV) {
+                size_t symOff = v2off(symtabV), strOff = v2off(strtabV);
+                if (symOff != (size_t) -1 && strOff != (size_t) -1 && strOff < sz) {
+                    size_t nsym = (strtabV - symtabV) / sizeof(ElfW(Sym));
+                    const ElfW(Sym) *symtab = (const ElfW(Sym) *) (p + symOff);
+                    const char *strtab = (const char *) (p + strOff);
+                    for (size_t i = 0; i < nsym; i++) {
+                        if (symtab[i].st_value == 0) continue;
+                        if (strOff + symtab[i].st_name >= sz) continue;
+                        if (strcmp(strtab + symtab[i].st_name, symbol) != 0) continue;
+                        uintptr_t stv = (uintptr_t) symtab[i].st_value;
+                        size_t fo = v2off(stv);
+                        uintptr_t rt = base + stv;
+                        if (fo != (size_t) -1 && fo + 16 <= sz && xffAddrReadable(regs, rt, 16)) {
+                            memcpy(diskOut, p + fo, 16);
+                            memcpy(memOut, reinterpret_cast<const void *>(rt), 16);
+                            if (addrOut) *addrOut = rt;
+                            ok = true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    munmap(map, sz);
+    return ok;
+}
+
+// AArch64 首指令模式识别(给命中的 hook 打标签)
+static const char *xffPatchKind(const uint8_t *mem) {
+    uint32_t insn = mem[0] | (mem[1] << 8) | (mem[2] << 16) | ((uint32_t) mem[3] << 24);
+    if (insn == 0xD65F03C0u) return "RET_PATCH";           // ret(把函数废成直接返回)
+    if ((insn & 0xFC000000u) == 0x14000000u) return "B_TRAMPOLINE";   // b   (无条件跳)
+    if ((insn & 0xFC000000u) == 0x94000000u) return "BL_TRAMPOLINE";  // bl
+    if ((insn & 0xFFFFFC1Fu) == 0xD61F0000u) return "BR_TRAMPOLINE";  // br xN
+    if ((insn & 0x9F000000u) == 0x90000000u) return "ADRP_TRAMPOLINE"; // adrp(常见 ldr x16+br 绝对跳的头)
+    return "INLINE_HOOK";
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_xff_launch_detector_NativeDetector_getFunctionHookReport(JNIEnv *env, jobject thiz) {
+    std::vector<XffHookRegion> regs = xffParseSelfMaps();
+    std::string report;
+
+    // Frida/Xposed/hook 框架常 inline-hook 的关键函数(soname, mangled/exported symbol)
+    struct FnT { const char *so; const char *sym; };
+    static const FnT targets[] = {
+        // libc I/O / 反调试相关(Frida 常 hook)
+        {"libc.so", "open"}, {"libc.so", "openat"}, {"libc.so", "read"},
+        {"libc.so", "close"}, {"libc.so", "access"}, {"libc.so", "faccessat"},
+        {"libc.so", "execve"}, {"libc.so", "fork"}, {"libc.so", "ptrace"},
+        {"libc.so", "connect"}, {"libc.so", "socket"}, {"libc.so", "kill"},
+        {"libc.so", "__system_property_get"}, {"libc.so", "dlopen"}, {"libc.so", "dlsym"},
+        {"libc.so", "mmap"}, {"libc.so", "mprotect"}, {"libc.so", "strcmp"},
+        {"libc.so", "fopen"}, {"libc.so", "readlinkat"},
+        // linker:dlopen 拦截
+        {"linker64", "__loader_android_dlopen_ext"}, {"linker64", "android_dlopen_ext"},
+        // libart:ART 运行时 hook 点
+        {"libart.so", "_ZN3art9ArtMethod6InvokeEPNS_6ThreadEPjjPNS_6JValueEPKc"},
+        {"libart.so", "_ZN3art2gc4Heap18GrowForUtilizationEPNS0_9collector16GarbageCollectorEm"},
+        {"libart.so", "artFindNativeMethod"},
+        // libmediandk:DRM 设备 ID getter(防伪造)
+        {"libmediandk.so", "AMediaDrm_getPropertyString"},
+    };
+
+    int checked = 0, hooked = 0;
+    for (const auto &t : targets) {
+        uint8_t disk[16], mem[16];
+        uintptr_t addr = 0;
+        if (!xffFuncBytes(regs, t.so, t.sym, disk, mem, &addr)) continue;
+        checked++;
+        if (memcmp(disk, mem, 16) != 0) {
+            hooked++;
+            const char *kind = xffPatchKind(mem);
+            char b[96];
+            snprintf(b, sizeof(b), "FUNC_HOOK=%s!%s [%s] mem=%02x%02x%02x%02x disk=%02x%02x%02x%02x\n",
+                     t.so, t.sym, kind, mem[0], mem[1], mem[2], mem[3], disk[0], disk[1], disk[2], disk[3]);
+            report += b;
+            __android_log_print(ANDROID_LOG_WARN, "HookDetector",
+                                "[A] inline-hooked: %s!%s [%s]", t.so, t.sym, kind);
+        }
+    }
+
+    // 具名 hook 框架 anon 区匹配(shadowhook/bytehook/Frida gum/substrate)
+    {
+        std::string maps = syscall_read_file_full("/proc/self/maps");
+        static const char *kNamed[] = {
+            "shadowhook", "bytehook", "plt-trampolines", "gum-", "frida",
+            "substrate", "dobby", "whale", "epic",
+        };
+        std::stringstream ms(maps);
+        std::string ln;
+        std::set<std::string> seenNamed;
+        while (std::getline(ms, ln)) {
+            for (const char *nm : kNamed) {
+                if (ln.find(nm) == std::string::npos) continue;
+                size_t br = ln.find('[');
+                std::string tag = (br != std::string::npos) ? ln.substr(br) : ln;
+                if (seenNamed.count(tag)) break;
+                seenNamed.insert(tag);
+                report += std::string("NAMED_HOOK=") + tag + "\n";
+                __android_log_print(ANDROID_LOG_WARN, "HookDetector", "[A] named hook region: %s", tag.c_str());
+                break;
+            }
+        }
+    }
+
+    __android_log_print(ANDROID_LOG_DEBUG, "HookDetector",
+                        "[A] funcs checked=%d inline-hooked=%d", checked, hooked);
+    if (report.empty()) report = "CLEAN\n";
+    return env->NewStringUTF(report.c_str());
+}
+
+// ============ [XFF-B] 反 DBI/模拟器探针 ============
+
+// B1. SMC 自修改代码执行探针(借鉴 libtiny sub_446800,反 Frida/QBDI/DBI)。
+// 运行期把 `movz x0,#imm; ret` 写进可执行页 → 立刻执行 → 验返回值==imm,多轮换 imm。
+// Frida Stalker/QBDI 等 DBI 缓存翻译代码,对"运行期新写入的自修改代码"跟不进/执行旧缓存 → 返回值发散。
+// 返回:0=正常, 1=命中异常(DBI/SMC 不一致), -1=无法测试(mprotect 被 SELinux 拒,execmem)。
+JNIEXPORT jint JNICALL
+Java_com_xff_launch_detector_NativeDetector_smcExecProbe(JNIEnv *env, jobject thiz) {
+#if defined(__aarch64__)
+    long pg = sysconf(_SC_PAGESIZE);
+    if (pg <= 0) pg = 4096;
+    void *mem = mmap(nullptr, (size_t) pg, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) return -1;
+
+    int anomaly = 0;
+    typedef long (*fn_t)();
+    for (int i = 0; i < 30 && anomaly == 0; i++) {
+        uint16_t imm = (uint16_t) (0x111 + i);
+        uint32_t insn0 = 0xD2800000u | ((uint32_t) imm << 5);   // movz x0, #imm
+        uint32_t insn1 = 0xD65F03C0u;                           // ret
+        reinterpret_cast<uint32_t *>(mem)[0] = insn0;
+        reinterpret_cast<uint32_t *>(mem)[1] = insn1;
+        if (mprotect(mem, (size_t) pg, PROT_READ | PROT_EXEC) != 0) { munmap(mem, (size_t) pg); return -1; }
+        __builtin___clear_cache(reinterpret_cast<char *>(mem), reinterpret_cast<char *>(mem) + 8);
+        long r = (reinterpret_cast<fn_t>(mem))();
+        if (r != (long) imm) anomaly = 1;
+        mprotect(mem, (size_t) pg, PROT_READ | PROT_WRITE);
+    }
+    munmap(mem, (size_t) pg);
+    __android_log_print(ANDROID_LOG_DEBUG, "HookDetector", "[B1] SMC exec probe anomaly=%d", anomaly);
+    return anomaly;
+#else
+    (void) env; (void) thiz;
+    return -1;   // 仅 arm64 实现(手写 AArch64 指令)
+#endif
+}
+
+// B2. 内存写入计时基准(借鉴 libtiny key24,反模拟器/反单步)。CNTVCT_EL0 计 100 轮打散写 10240 页
+// 的周期数。模拟器软件 MMU / DBI 逐指令拦截 → 周期暴涨。返回每轮周期数(信息性指纹,Java 侧判阈值)。
+JNIEXPORT jlong JNICALL
+Java_com_xff_launch_detector_NativeDetector_memWriteTimingCycles(JNIEnv *env, jobject thiz) {
+    const size_t total = 40u * 1024 * 1024;   // 40MB
+    long pg = sysconf(_SC_PAGESIZE);
+    if (pg <= 0) pg = 4096;
+    size_t npages = total / (size_t) pg;
+    volatile char *buf = (volatile char *) mmap(nullptr, total, PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (buf == (void *) MAP_FAILED) return -1;
+    for (size_t i = 0; i < npages; i++) buf[i * (size_t) pg] = 0;   // 预热
+
+    uint64_t t0 = 0, t1 = 0;
+#if defined(__aarch64__)
+    asm volatile("mrs %0, cntvct_el0" : "=r"(t0));
+    for (int r = 0; r < 100; r++)
+        for (size_t i = 0; i < npages; i++) buf[i * (size_t) pg] = (char) r;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(t1));
+#else
+    // 非 arm64:用 clock_gettime(纳秒)兜底(单位不同,信息性)
+    struct timespec ts0, ts1;
+    clock_gettime(CLOCK_MONOTONIC, &ts0);
+    for (int r = 0; r < 100; r++)
+        for (size_t i = 0; i < npages; i++) buf[i * (size_t) pg] = (char) r;
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    t0 = (uint64_t) ts0.tv_sec * 1000000000ull + ts0.tv_nsec;
+    t1 = (uint64_t) ts1.tv_sec * 1000000000ull + ts1.tv_nsec;
+#endif
+
+    munmap((void *) buf, total);
+    long perRound = (long) ((t1 - t0) / 100);
+    __android_log_print(ANDROID_LOG_DEBUG, "HookDetector", "[B2] mem-write cycles/round=%ld", perRound);
+    return perRound;
+}
+
+// B3. mincore + demand-paging 一致性(借鉴 libtiny sub_446B50,反模拟器/反 replay/反内存篡改)。
+// 刚 mmap 的匿名页在真机是 demand-paging:触碰前应"未驻留";若触碰前就已驻留 = 异常内存语义。
+// 返回:0=正常, 1=异常(触碰前已驻留), -1=无法测试。
+JNIEXPORT jint JNICALL
+Java_com_xff_launch_detector_NativeDetector_demandPagingAnomaly(JNIEnv *env, jobject thiz) {
+    long pg = sysconf(_SC_PAGESIZE);
+    if (pg <= 0) pg = 4096;
+    void *m = mmap(nullptr, (size_t) pg, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) return -1;
+    int anomaly = 0;
+    unsigned char vec = 0;
+    if (mincore(m, (size_t) pg, &vec) == 0) {
+        if (vec & 1) anomaly = 1;               // 触碰前已驻留 = 异常
+        *(volatile char *) m = 1;               // 触碰
+        unsigned char vec2 = 0;
+        if (mincore(m, (size_t) pg, &vec2) == 0 && !(vec2 & 1)) anomaly = 1;  // 触碰后仍不驻留 = 异常
+    } else {
+        munmap(m, (size_t) pg);
+        return -1;
+    }
+    munmap(m, (size_t) pg);
+    __android_log_print(ANDROID_LOG_DEBUG, "HookDetector", "[B3] demand-paging anomaly=%d", anomaly);
+    return anomaly;
+}
+
 // 【子进程·全部在这里做】危险的 ClassLinker 枚举**只能**在 fork 出的一次性子进程里做:
 //   ① 校准 class_linker_ 偏移时,错误偏移会把 libart 带进 CHECK/abort(SIGABRT);
 //   ② 即便偏移正确,在活 runtime 上遍历类表/GetDescriptor 也会触发 ART 正常的隐式 SIGSEGV

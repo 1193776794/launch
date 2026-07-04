@@ -387,6 +387,97 @@ public class HookDetector {
         return item;
     }
 
+    /**
+     * [XFF-A] 函数级 inline-hook 检测:关键 libc/libart/linker 函数的内存首字节 vs 磁盘 ELF 原始
+     * 首字节比对,不一致=被 inline-hook(头部改成跳 trampoline 的分支/ret)。序言位置无关不受
+     * 重定位影响,比对可靠。另匹配具名 hook 框架 anon 区(shadowhook/bytehook/Frida gum 等)。
+     */
+    public DetectionItem detectFunctionInlineHooks() {
+        DetectionItem item = new DetectionItem("函数级 inline-hook [字节比对]",
+                "关键函数内存字节 vs 磁盘 ELF 字节比对");
+        boolean detected = false;
+        try {
+            String report = nativeDetector.getFunctionHookReport();
+            if (report != null && !report.trim().equals("CLEAN")) {
+                for (String ln : report.split("\n")) {
+                    ln = ln.trim();
+                    if (ln.isEmpty() || ln.equals("CLEAN")) continue;
+                    detected = true;
+                    if (ln.startsWith("NAMED_HOOK=")) {
+                        item.addDetectionDetail("🧨 Hook框架区", ln.substring("NAMED_HOOK=".length()),
+                                "maps 命中具名 hook 框架内存区(shadowhook/bytehook/Frida 等)",
+                                DetectionLayer.NATIVE, "🚨");
+                    } else {
+                        String val = ln.startsWith("FUNC_HOOK=") ? ln.substring("FUNC_HOOK=".length()) : ln;
+                        item.addDetectionDetail("🎯 被Hook函数", val,
+                                "内存首字节 ≠ 磁盘 ELF 原始字节 = inline hook",
+                                DetectionLayer.NATIVE, "🚨");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.d("HookDetector", "A func-hook report error: " + e.getMessage());
+        }
+        item.setLayerResult(DetectionLayer.NATIVE, detected);
+        item.setLayerResult(DetectionLayer.SYSCALL, detected);
+        if (detected) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到关键函数被 inline-hook");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("关键函数字节与磁盘一致, 未见 inline-hook");
+        }
+        return item;
+    }
+
+    /**
+     * [XFF-B] 反 DBI/模拟器探针:SMC 自修改代码执行一致性(反 Frida/QBDI)+ mincore demand-paging
+     * 一致性(反模拟器/replay)+ 内存写入 CNTVCT 计时(信息性)。前两项异常判 RISK,计时仅作详情。
+     */
+    public DetectionItem detectAntiDBI() {
+        DetectionItem item = new DetectionItem("反 DBI/模拟器探针",
+                "SMC 执行一致性 + demand-paging + 内存计时");
+        boolean detected = false;
+        try {
+            int smc = nativeDetector.smcExecProbe();
+            if (smc == 1) {
+                detected = true;
+                item.addDetectionDetail("🧬 SMC 执行异常", "自修改代码返回值发散",
+                        "运行期写入并执行的指令结果对不上 = Frida/QBDI 等 DBI 跟不进自修改代码",
+                        DetectionLayer.NATIVE, "🚨");
+            } else if (smc == -1) {
+                item.addDetectionDetail("ℹ️ SMC 探针", "无法测试",
+                        "mprotect(RX) 被 SELinux 拒(execmem 受限)", DetectionLayer.NATIVE, "🔒");
+            }
+
+            int dp = nativeDetector.demandPagingAnomaly();
+            if (dp == 1) {
+                detected = true;
+                item.addDetectionDetail("🧬 内存分页异常", "demand-paging 语义异常",
+                        "匿名页触碰前已驻留/触碰后不驻留 = 模拟器/被插桩内存",
+                        DetectionLayer.NATIVE, "🚨");
+            }
+
+            long cyc = nativeDetector.memWriteTimingCycles();
+            if (cyc > 0) {
+                item.addDetectionDetail("⏱️ 内存写入计时", cyc + " cycles/round",
+                        "40MB×100轮打散写周期数(信息性,模拟器/单步会暴涨)",
+                        DetectionLayer.NATIVE, "📊");
+            }
+        } catch (Exception e) {
+            android.util.Log.d("HookDetector", "B anti-DBI probe error: " + e.getMessage());
+        }
+        item.setLayerResult(DetectionLayer.NATIVE, detected);
+        if (detected) {
+            item.setStatus(DetectionStatus.RISK);
+            item.setDetail("检测到 DBI 插桩/模拟器内存异常");
+        } else {
+            item.setStatus(DetectionStatus.SAFE);
+            item.setDetail("SMC 执行一致, 内存分页正常");
+        }
+        return item;
+    }
+
     // ---- T1/T4 辅助方法 ----
 
     /** 宿主自身合法 apk/lib 路径集合(base.apk + splits + nativeLibDir) */
@@ -1184,6 +1275,8 @@ public class HookDetector {
         items.add(detectModuleInjectionArtifacts());  // [XFF-T1/T2/T3] 外来 DEX/APK/FD
         items.add(detectClassLoaderEnumeration());    // [XFF-T4/T5] ClassLoader 旁支 + 引擎库
         items.add(detectLSPlantHookedMethods());      // [XFF-T6] ArtMethod hook 点
+        items.add(detectFunctionInlineHooks());       // [XFF-A] 函数级 inline-hook(字节比对)
+        items.add(detectAntiDBI());                   // [XFF-B] 反 DBI/模拟器探针
         items.add(detectZygisk());
         items.add(detectSmapsHook());
         items.add(detectMemoryIntegrity());
