@@ -1408,6 +1408,11 @@ namespace {
                p.rfind("/apex/", 0) == 0 ||
                p.rfind("/vendor/", 0) == 0 ||
                p.rfind("/product/", 0) == 0 ||
+               // [修正·FP] /odm 是 OEM/ODM 系统分区,/odm/overlay/*.apk 是合法 RRO 资源覆盖
+               // (如 OPlusFrameworksResTarget.apk),框架给每个 app 加载,非注入。/oem、/my_* 同理。
+               p.rfind("/odm/", 0) == 0 ||
+               p.rfind("/oem/", 0) == 0 ||
+               p.rfind("/my_", 0) == 0 ||
                p.find("/dalvik-cache/") != std::string::npos ||   // 系统 AOT 缓存
                p.find("boot.oat") != std::string::npos ||
                p.find("boot.art") != std::string::npos ||

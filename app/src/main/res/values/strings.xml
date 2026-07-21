@@ -50,6 +50,9 @@
     <string name="category_bootloader">Bootloader 解锁</string>
     <string name="category_authenticity">设备真实度</string>
     <string name="category_multi_instance">多开/沙箱</string>
+    <string name="category_device_consistency">机型一致性</string>
+    <string name="category_system_service">系统服务/框架</string>
+    <string name="category_device_spoof">改机/新机检测</string>
 
     <!-- Zygote Detection Items -->
     <string name="detect_zygisk">Zygisk 注入</string>

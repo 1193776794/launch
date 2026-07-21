@@ -205,10 +205,10 @@ std::vector<uint8_t> IntegrityDetector::readLibraryFile(const std::string& path)
     size_t file_size = st.st_size;
     LOGD("Reading library file: %s (size: %zu bytes)", path.c_str(), file_size);
 
-    // Limit to reasonable size (e.g., 10MB)
-    if (file_size > 10 * 1024 * 1024) {
-        LOGW("Library file too large: %zu bytes, limiting to 10MB", file_size);
-        file_size = 10 * 1024 * 1024;
+    // Limit to reasonable size (64MB — libart.so 已达 ~13MB,旧 10MB 上限会截断到 .text 之前)
+    if (file_size > 64 * 1024 * 1024) {
+        LOGW("Library file too large: %zu bytes, limiting to 64MB", file_size);
+        file_size = 64 * 1024 * 1024;
     }
 
     data.resize(file_size);
@@ -343,62 +343,31 @@ bool IntegrityDetector::compareTextSections(uintptr_t mem_base,
     LOGD("compareTextSections: mem_base=0x%lx + text_vaddr=0x%zx = mem_text=0x%lx, text_size=0x%zx",
          mem_base, text_vaddr, mem_text_addr, text_size);
 
-    // Validate the memory address is readable before accessing it.
-    // Use mincore() or simply try to read via /proc/self/mem to avoid SIGSEGV.
-    // Safest approach: read through /proc/self/mem which returns error instead of crashing.
-    int mem_fd = syscall_wrapper(__NR_openat, AT_FDCWD, "/proc/self/mem", O_RDONLY);
-    if (mem_fd < 0) {
-        LOGW("Cannot open /proc/self/mem, skipping comparison");
-        return false;
-    }
-
-    // Read a small sample from memory through /proc/self/mem (safe, no SIGSEGV)
-    const size_t SAMPLE_SIZE = 4096;
-    size_t check_size = std::min(SAMPLE_SIZE, text_size);
-    std::vector<uint8_t> mem_sample(check_size);
-
-    // Seek to the memory address
-    off_t seek_result = lseek(mem_fd, (off_t)mem_text_addr, SEEK_SET);
-    if (seek_result < 0 || (uintptr_t)seek_result != mem_text_addr) {
-        LOGW("Cannot seek to 0x%lx in /proc/self/mem (errno=%d), skipping", mem_text_addr, errno);
-        syscall_wrapper(__NR_close, mem_fd);
-        return false;
-    }
-
-    ssize_t bytes_read = syscall_wrapper(__NR_read, mem_fd, mem_sample.data(), check_size);
-    syscall_wrapper(__NR_close, mem_fd);
-
-    if (bytes_read <= 0) {
-        LOGW("Cannot read memory at 0x%lx (read=%zd, errno=%d), skipping", mem_text_addr, bytes_read, errno);
-        return false;
-    }
-
-    // Compare the beginning of .text
+    // [XFF] Hunter 风格:**直接指针**读 .text 逐字节比对(不走 /proc/self/mem)。
+    // 关键:沙箱屏蔽了 /proc/self/mem 打开(旧版在此静默 skip→假 PASSED),且内核 READ_ORIG(K3-V2)
+    // 只拦 /proc/pid/mem·ptrace·process_vm_readv 这些 remote 读,**进程内裸指针读拦不到** → 直读能看到
+    // 真实(被 hook 后)字节,正是 Hunter 的 detect_elf_checksum 干的事。r-x 页在 SM8550(无 EPAN)可读。
     const uint8_t* disk_text = disk_data.data() + text_offset;
-    int diff_count = 0;
-    int total_checked = (int)bytes_read;
-
-    for (int i = 0; i < total_checked; i++) {
-        if (mem_sample[i] != disk_text[i]) {
+    const volatile uint8_t* mem_text = reinterpret_cast<const volatile uint8_t*>(mem_text_addr);
+    size_t diff_count = 0;
+    long first_diff = -1;
+    uint8_t first_mem = 0, first_disk = 0;
+    for (size_t i = 0; i < text_size; i++) {
+        uint8_t mv = mem_text[i];
+        if (mv != disk_text[i]) {
+            if (first_diff < 0) { first_diff = (long)i; first_mem = mv; first_disk = disk_text[i]; }
             diff_count++;
-            if (diff_count == 1) {
-                LOGD("First diff at .text+0x%x: mem=0x%02x disk=0x%02x",
-                     i, mem_sample[i], disk_text[i]);
-            }
         }
     }
 
-    if (total_checked == 0) return false;
-
-    float diff_rate = (float)diff_count / total_checked;
-    LOGD("Comparison: %d/%d bytes differ (%.2f%%) at mem=0x%lx",
-         diff_count, total_checked, diff_rate * 100, mem_text_addr);
-
-    // Threshold: >1% difference indicates potential hook.
-    // Normal relocations don't modify .text (they modify .got/.data).
-    // Even a single byte difference in .text is suspicious, but we use 1% to
-    // tolerate edge cases like text relocations on older Android versions.
-    return diff_rate > 0.01f;
+    if (first_diff >= 0) {
+        LOGW("[XFF-CRC] .text DIRTY: %zu bytes differ, first@.text+0x%lx (mem=0x%02x disk=0x%02x) mem_text=0x%lx size=0x%zx",
+             diff_count, first_diff, first_mem, first_disk, mem_text_addr, text_size);
+        return true;   // hooked（任一字节不同）
+    }
+    LOGD("[XFF-CRC] .text CLEAN (%zu bytes all match, mem_text=0x%lx size=0x%zx)",
+         text_size, mem_text_addr, text_size);
+    return false;
 }
 
 /**
@@ -893,7 +862,33 @@ IntegrityDetector::IntegrityResult IntegrityDetector::checkAllSystemLibraries() 
     return result;
 }
 
+// [XFF] Hunter 风格补充:linker64 全 r-x 直读比对 + rwx 段扫描(Hunter:mem!=disk 或 rwx 段=hooked)。
+static void xff_raw_scan() {
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    while (std::getline(maps, line)) {
+        uintptr_t s=0,e=0; char perms[8]={0}; unsigned long off=0; char path[600]={0};
+        int n = sscanf(line.c_str(), "%lx-%lx %7s %lx %*s %*s %599[^\n]", &s,&e,perms,&off,path);
+        if (n < 4) continue;
+        if (perms[0]=='r'&&perms[1]=='w'&&perms[2]=='x')
+            LOGW("[XFF-RAW] RWX segment %lx-%lx off=0x%lx %s", s,e,off, path[0]?path:"[anon]");
+        if (perms[0]=='r'&&perms[2]=='x'&&path[0]=='/' &&
+            (strstr(path,"linker64")||strstr(path,"libandroid_servers_ext")||strstr(path,"liblspd"))) {
+            size_t len=e-s;
+            int fd=open(path,O_RDONLY); if(fd<0) continue;
+            std::vector<uint8_t> disk(len); ssize_t g=pread(fd,disk.data(),(size_t)len,(off_t)off); close(fd);
+            if(g<=0) continue;
+            const volatile uint8_t* mem=(const volatile uint8_t*)s;
+            long first=-1; size_t dc=0; uint8_t fm=0,fd8=0;
+            for(size_t i=0;i<(size_t)g;i++){ uint8_t mv=mem[i]; if(mv!=disk[i]){ if(first<0){first=(long)i;fm=mv;fd8=disk[i];} dc++; } }
+            if(first>=0) LOGW("[XFF-RAW] %s r-x DIRTY %zu bytes first@0x%lx (mem=0x%02x disk=0x%02x) map=0x%lx off=0x%lx", path, dc, first, fm, fd8, s, off);
+            else LOGD("[XFF-RAW] %s r-x CLEAN (%zd bytes)", path, g);
+        }
+    }
+}
+
 std::string IntegrityDetector::getIntegrityReport() {
+    xff_raw_scan();
     IntegrityResult result = checkAllSystemLibraries();
 
     std::ostringstream json;

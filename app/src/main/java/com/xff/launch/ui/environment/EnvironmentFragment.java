@@ -30,6 +30,9 @@ import com.xff.launch.detector.SideChannelDetector;
 import com.xff.launch.detector.TamperDetector;
 import com.xff.launch.detector.BootloaderDetector;
 import com.xff.launch.detector.DeviceAuthenticityDetector;
+import com.xff.launch.detector.DeviceConsistencyDetector;
+import com.xff.launch.detector.SystemServiceDetector;
+import com.xff.launch.detector.DeviceSpoofDetector;
 import com.xff.launch.detector.MultiInstanceDetector;
 import com.xff.launch.model.DetectionCategory;
 import com.xff.launch.model.DetectionGroup;
@@ -131,6 +134,9 @@ public class EnvironmentFragment extends Fragment {
         final String strNetwork = getString(R.string.category_network);
         final String strAuthenticity = getString(R.string.category_authenticity);
         final String strMultiInstance = getString(R.string.category_multi_instance);
+        final String strDeviceConsistency = getString(R.string.category_device_consistency);
+        final String strSystemService = getString(R.string.category_system_service);
+        final String strDeviceSpoof = getString(R.string.category_device_spoof);
 
         swipeRefresh.setRefreshing(true);
 
@@ -138,7 +144,8 @@ public class EnvironmentFragment extends Fragment {
             DetectionResult result = performDetection(ctx,
                     strRoot, strHook, strEmulator, strDebug, strSideChannel,
                     strReadlink, strTamper, strBootloader, strNetwork,
-                    strAuthenticity, strMultiInstance);
+                    strAuthenticity, strMultiInstance,
+                    strDeviceConsistency, strSystemService, strDeviceSpoof);
 
             if (getActivity() != null && isAdded()) {
                 getActivity().runOnUiThread(() -> {
@@ -155,7 +162,8 @@ public class EnvironmentFragment extends Fragment {
             String strRoot, String strHook, String strEmulator, String strDebug,
             String strSideChannel, String strReadlink,
             String strTamper, String strBootloader, String strNetwork,
-            String strAuthenticity, String strMultiInstance) {
+            String strAuthenticity, String strMultiInstance,
+            String strDeviceConsistency, String strSystemService, String strDeviceSpoof) {
         DetectionResult result = new DetectionResult();
         List<DetectionGroup> groups = new ArrayList<>();
 
@@ -272,6 +280,36 @@ public class EnvironmentFragment extends Fragment {
         MultiInstanceDetector multiInstanceDetector = new MultiInstanceDetector(ctx);
         multiInstanceGroup.setItems(multiInstanceDetector.getAllDetections());
         groups.add(multiInstanceGroup);
+
+        // Device Consistency (机型一致性: Build/property 多源交叉 + 分区自洽 + SoC + 屏幕/传感器)
+        DetectionGroup deviceConsistencyGroup = new DetectionGroup(
+                strDeviceConsistency,
+                DetectionCategory.DEVICE_CONSISTENCY,
+                R.drawable.ic_phone
+        );
+        DeviceConsistencyDetector deviceConsistencyDetector = new DeviceConsistencyDetector(ctx);
+        deviceConsistencyGroup.setItems(deviceConsistencyDetector.getAllDetections());
+        groups.add(deviceConsistencyGroup);
+
+        // System Service / OEM Framework (servicemanager / com.oplus.* / VINTF HAL / ROM 残留 / 库完整性)
+        DetectionGroup systemServiceGroup = new DetectionGroup(
+                strSystemService,
+                DetectionCategory.SYSTEM_SERVICE,
+                R.drawable.ic_integrity
+        );
+        SystemServiceDetector systemServiceDetector = new SystemServiceDetector(ctx);
+        systemServiceGroup.setItems(systemServiceDetector.getAllDetections());
+        groups.add(systemServiceGroup);
+
+        // Device Spoof / 改机·一键新机 (工具包/留痕文件/磁盘 build.prop vs 运行期/boot dex/伪装.so/标识符漂移)
+        DetectionGroup deviceSpoofGroup = new DetectionGroup(
+                strDeviceSpoof,
+                DetectionCategory.DEVICE_SPOOF,
+                R.drawable.ic_tamper
+        );
+        DeviceSpoofDetector deviceSpoofDetector = new DeviceSpoofDetector(ctx);
+        deviceSpoofGroup.setItems(deviceSpoofDetector.getAllDetections());
+        groups.add(deviceSpoofGroup);
 
         result.setGroups(groups);
         result.calculateScore();

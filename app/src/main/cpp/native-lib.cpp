@@ -1,3 +1,4 @@
+#include <fstream>
 #include <jni.h>
 #include <string>
 #include <cstdio>
@@ -2796,7 +2797,10 @@ Java_com_xff_launch_detector_NativeDetector_getMapsHashNative(JNIEnv *env, jobje
             // Trim newline
             char* nl = strchr(path, '\n');
             if (nl) *nl = '\0';
-            libs.insert(path);
+            // [修正·FP] 只比较真实 .so 库路径:排除 [anon:dalvik-/system/...]、memfd、heap 等
+            // 名字里含 '/' 的易变匿名区(GC/JIT 间隔两次读会抖动 → 与 syscall 读产生假不一致)。
+            // 目的仅为发现"libc 读 maps 被 hook 过滤掉某注入 .so 而 syscall 读没被过滤",故只需 .so 集。
+            if (strstr(path, ".so")) libs.insert(path);
         }
     }
     fclose(fp);
@@ -2816,7 +2820,9 @@ Java_com_xff_launch_detector_NativeDetector_getMapsHashNative(JNIEnv *env, jobje
 
 JNIEXPORT jstring JNICALL
 Java_com_xff_launch_detector_NativeDetector_getMapsHashSyscall(JNIEnv *env, jobject thiz) {
-    std::string maps = syscall_read_file("/proc/self/maps", 262144);
+    // [修正·FP] 必须整读:/proc/self/maps 是 seq_file,单次 read() 只回一页/部分 →
+    // 与 libc fopen+循环读到的全量不一致 → 每个 app 都假报"maps 跨层不一致"。用 _full 循环读全量。
+    std::string maps = syscall_read_file_full("/proc/self/maps");
     if (maps.empty()) return env->NewStringUTF("");
 
     std::set<std::string> libs;
@@ -2833,7 +2839,8 @@ Java_com_xff_launch_detector_NativeDetector_getMapsHashSyscall(JNIEnv *env, jobj
             while (!libPath.empty() && (libPath.back() == ' ' || libPath.back() == '\r')) {
                 libPath.pop_back();
             }
-            libs.insert(libPath);
+            // [修正·FP] 与 getMapsHashNative 一致:只比较真实 .so 库路径,排除易变匿名区。
+            if (libPath.find(".so") != std::string::npos) libs.insert(libPath);
         }
         pos = lineEnd + 1;
     }
@@ -3468,8 +3475,68 @@ Java_com_xff_launch_detector_NativeDetector_checkAndroidRuntimeIntegrity(JNIEnv 
     return IntegrityDetector::checkAndroidRuntimeIntegrity();
 }
 
+// [XFF] 攻坚 ART-redirect:查被沙箱 hook 的方法的 ArtMethod entry_point。
+// 0066 生效 → entry==QuickToInterpreterBridge(在 libart .text 内)、access_flags 原封;
+// 回退到经典 patch → entry 指向 libart 外的 trampoline(memfd/anon)。
+static void xff_dump_method_entries(JNIEnv *env) {
+    uintptr_t la_s = 0, la_e = 0;   // libart r-x 段
+    { std::ifstream m("/proc/self/maps"); std::string ln;
+      while (std::getline(m, ln)) {
+        if (ln.find("r-xp") != std::string::npos && ln.find("libart.so") != std::string::npos) {
+            sscanf(ln.c_str(), "%lx-%lx", &la_s, &la_e); break;
+        } } }
+    struct MT { const char* cls; const char* name; const char* sig; int hooked; } M[] = {
+        {"android/app/ActivityManager", "getMemoryInfo", "(Landroid/app/ActivityManager$MemoryInfo;)V", 1},
+        {"android/location/Location",   "getLatitude",   "()D", 1},
+        {"java/lang/Object",            "hashCode",      "()I", 0},
+    };
+    for (auto &t : M) {
+        jclass c = env->FindClass(t.cls);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+        if (!c) continue;
+        jmethodID mid = env->GetMethodID(c, t.name, t.sig);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+        if (!mid) continue;
+        char *am = (char*)mid;                       // ART: jmethodID == ArtMethod*
+
+        // jmethodID is an opaque handle.  With ART's compact JNI id table enabled it
+        // can be a small encoded value (for example 0xa2f), not an ArtMethod pointer.
+        // Dereferencing such an id caused the startup SIGSEGV seen on MIUI/Android 13.
+        // Only inspect it when the complete byte range is covered by a readable map.
+        uintptr_t amAddr = reinterpret_cast<uintptr_t>(am);
+        bool readable = false;
+        {
+            std::ifstream maps("/proc/self/maps");
+            std::string line;
+            while (std::getline(maps, line)) {
+                unsigned long start = 0, end = 0;
+                char perms[5] = {};
+                if (sscanf(line.c_str(), "%lx-%lx %4s", &start, &end, perms) == 3 &&
+                    perms[0] == 'r' && amAddr >= start && amAddr <= end &&
+                    sizeof(void*) <= end - amAddr && 24 <= end - amAddr - sizeof(void*)) {
+                    readable = true;
+                    break;
+                }
+            }
+        }
+        if (!readable) {
+            __android_log_print(5, "XFF-ART",
+                "%s.%s jmethodID=%p is opaque/encoded; skip raw ArtMethod read",
+                t.cls, t.name, mid);
+            continue;
+        }
+        uint32_t flags = *(uint32_t*)(am + 4);       // access_flags_@+4
+        void *entry = *(void**)(am + 24);            // entry_point_from_quick_@+24 (A16 64bit)
+        bool inLibart = ((uintptr_t)entry >= la_s && (uintptr_t)entry < la_e);
+        __android_log_print(5, "XFF-ART",
+            "%s.%s hooked=%d entry=%p inLibart=%d flags=0x%08x",
+            t.cls, t.name, t.hooked, entry, inLibart ? 1 : 0, flags);
+    }
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_xff_launch_detector_NativeDetector_checkAllSystemLibrariesIntegrity(JNIEnv *env, jobject thiz) {
+    xff_dump_method_entries(env);
     std::string report = IntegrityDetector::getIntegrityReport();
     return env->NewStringUTF(report.c_str());
 }
