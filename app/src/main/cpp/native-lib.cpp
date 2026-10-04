@@ -3596,7 +3596,15 @@ Java_com_xff_launch_detector_NativeDetector_getVulkanFingerprintNative(JNIEnv *e
             std::vector<VkPhysicalDevice> devs(count);
             pfnEnum(inst, &count, devs.data());
             char buf[600];
-            if (pfnProps2) {
+            // 无条件先取 1.0 核心属性。vkGetPhysicalDeviceProperties 是所有驱动必修入口，
+            // 可作后续 apiVersion 判断的可靠依据。
+            VkPhysicalDeviceProperties p{};
+            pfnProps(devs[0], &p);
+            // 注意：loader 导出了 vkGetPhysicalDeviceProperties2 并不代表驱动可用——
+            // 该符号可能是 1.1 loader 的蹦床，尾跳进驱动为空的 dispatch 项导致 SIGSEGV(pc=0)
+            // (如 Mali r15p0 仅支持 Vulkan 1.0)。故必须以驱动上报的 apiVersion 为准回退，
+            // 不能仅凭 dlsym 非空判断。
+            if (pfnProps2 && p.apiVersion >= VK_API_VERSION_1_1) {
                 VkPhysicalDeviceIDProperties idp{};
                 idp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
                 VkPhysicalDeviceProperties2 p2{};
@@ -3610,8 +3618,6 @@ Java_com_xff_launch_detector_NativeDetector_getVulkanFingerprintNative(JNIEnv *e
                          p2.properties.vendorID, p2.properties.deviceID,
                          p2.properties.driverVersion, devUuid, drvUuid);
             } else {
-                VkPhysicalDeviceProperties p{};
-                pfnProps(devs[0], &p);
                 snprintf(buf, sizeof(buf), "%u|%u|%u", p.vendorID, p.deviceID, p.driverVersion);
             }
             result = buf;

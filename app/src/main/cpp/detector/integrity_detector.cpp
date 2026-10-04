@@ -50,6 +50,9 @@ static inline long syscall_wrapper(long number, ...) {
 #define LOGW(...) __android_log_print(5, LOG_TAG, __VA_ARGS__)  // ANDROID_LOG_WARN = 5
 #define LOGE(...) __android_log_print(6, LOG_TAG, __VA_ARGS__)  // ANDROID_LOG_ERROR = 6
 
+// Forward declaration: defined further below, after the maps-region cache.
+static bool isRangeReadable(uintptr_t addr, size_t len);
+
 // Critical functions to monitor
 const char* IntegrityDetector::CRITICAL_LIBC_FUNCTIONS[] = {
     "open", "openat", "read", "write", "access", "faccessat",
@@ -347,6 +350,14 @@ bool IntegrityDetector::compareTextSections(uintptr_t mem_base,
     // 关键:沙箱屏蔽了 /proc/self/mem 打开(旧版在此静默 skip→假 PASSED),且内核 READ_ORIG(K3-V2)
     // 只拦 /proc/pid/mem·ptrace·process_vm_readv 这些 remote 读,**进程内裸指针读拦不到** → 直读能看到
     // 真实(被 hook 后)字节,正是 Hunter 的 detect_elf_checksum 干的事。r-x 页在 SM8550(无 EPAN)可读。
+    // [XFF] maps 里可能存在映射洞(`---p` 保护页/未映射间隙),此时裸指针逐字节读会 SIGSEGV。
+    // 比对前先确认 [mem_text_addr, mem_text_addr+text_size) 每页都有可读映射覆盖;不可读则按未 hook 处理。
+    if (!isRangeReadable(mem_text_addr, text_size)) {
+        LOGW("[XFF-CRC] .text range not fully readable (mem_text=0x%lx size=0x%zx), skip compare",
+             mem_text_addr, text_size);
+        return false;
+    }
+
     const uint8_t* disk_text = disk_data.data() + text_offset;
     const volatile uint8_t* mem_text = reinterpret_cast<const volatile uint8_t*>(mem_text_addr);
     size_t diff_count = 0;
@@ -376,6 +387,7 @@ bool IntegrityDetector::compareTextSections(uintptr_t mem_base,
 struct MappedRegion {
     uintptr_t start;
     uintptr_t end;
+    bool read;
 };
 
 static std::vector<MappedRegion> s_known_regions;
@@ -399,8 +411,10 @@ static void loadKnownRegions() {
         if (path.empty() || path[0] != '/') continue;
 
         uintptr_t start, end;
-        if (sscanf(line.c_str(), "%lx-%lx", &start, &end) == 2) {
-            s_known_regions.push_back({start, end});
+        char perms[8] = {0};
+        if (sscanf(line.c_str(), "%lx-%lx %4s", &start, &end, perms) >= 2) {
+            bool readable = (perms[0] == 'r');
+            s_known_regions.push_back({start, end, readable});
         }
     }
     LOGD("Loaded %zu known library regions from /proc/self/maps", s_known_regions.size());
@@ -417,6 +431,32 @@ static bool isAddressInKnownLibrary(uintptr_t addr) {
         if (addr >= r.start && addr < r.end) return true;
     }
     return false;
+}
+
+/**
+ * Check that [addr, addr+len) is fully covered by readable mappings.
+ * /proc/self/maps is address-ascending, so a single forward cursor suffices.
+ * Any page not covered by a readable region (unmapped or `---p` hole) => false.
+ */
+static bool isRangeReadable(uintptr_t addr, size_t len) {
+    if (len == 0) return true;
+    if (addr == 0) return false;
+    loadKnownRegions();
+
+    uintptr_t end = addr + len;
+    size_t i = 0;
+    while (i < s_known_regions.size() && s_known_regions[i].end <= addr) i++;
+
+    uintptr_t cur = addr;
+    while (cur < end) {
+        if (i >= s_known_regions.size()) return false;
+        const MappedRegion& r = s_known_regions[i];
+        if (r.start > cur) return false;          // hole before next region
+        if (!r.read) return false;                // mapping present but not readable
+        if (r.end > cur) cur = r.end;             // advance coverage (region may abut)
+        i++;
+    }
+    return true;
 }
 
 bool IntegrityDetector::checkInlineHook(uintptr_t func_addr) {
